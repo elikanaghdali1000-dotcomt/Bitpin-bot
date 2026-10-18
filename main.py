@@ -3,7 +3,6 @@ import requests
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# توکن و چت‌آیدی شما مستقیماً اینجا قرار گرفت
 TELEGRAM_TOKEN = "*******"
 CHAT_ID = "6643451227"
 
@@ -28,15 +27,27 @@ def run_server():
     server.serve_forever()
 
 if __name__ == "__main__":
-    # استارت وب‌سرور در پس‌زمینه برای رندر
+    # استارت وب‌سرور در ترد جداگانه
     t = threading.Thread(target=run_server)
     t.daemon = True
     t.start()
     
-    print("Server started. Sending startup message to Telegram...")
+    print("Server started. Sending startup message...")
     # ارسال پیام تلگرام بلافاصله بعد از شروع
-    send_telegram_message("🤖 **ربات معامله‌گری بیت‌پین با موفقیت روشن شد!** پیام تست برقرار است.")
+    send_telegram_message("🤖 ربات معامله‌گری بیت‌پین روشن شد و آماده تست است!")
     
-    # حلقه ساده برای زنده نگه داشتن ربات
+    # حلقه برای بررسی قیمت و ارسال پیام
     while True:
+        try:
+            url = "https://api.bitpin.org/v1/mkt/markets/"
+            res = requests.get(url, timeout=10)
+            if res.status_code == 200:
+                data = res.json()
+                for market in data.get('results', []):
+                    if market.get('code') == 'BTC_USDT':
+                        price = market.get('price')
+                        print(f"Current BTC Price: {price}")
+        except Exception as err:
+            print("Error fetching price:", err)
+        
         time.sleep(60)
