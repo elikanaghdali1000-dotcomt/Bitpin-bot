@@ -68,7 +68,7 @@ def bot_loop():
 
 if __name__ == "__main__":
     # راه‌اندازی وب‌سرور در ترد جداگانه
-    t = threading.Thread(target=run_server)
+    t = threading.Thread(target=run_server).
     t.daemon = True
     t.start()
     
