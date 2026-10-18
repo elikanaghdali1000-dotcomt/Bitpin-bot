@@ -3,7 +3,9 @@ import requests
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-TELEGRAM_TOKEN = "*******"
+# توکن واقعی ربات تلگرام (که از BotFather گرفتید) رو اینجا بذارید
+TELEGRAM_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"
+# چت‌آیدی شما: 6643451227
 CHAT_ID = "6643451227"
 
 def send_telegram_message(text):
@@ -20,23 +22,23 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is running!")
+        self.wfile.write(b"Bitpin Anti-Range Bot is running!")
 
 def run_server():
     server = HTTPServer(('0.0.0.0', 10000), SimpleHTTPRequestHandler)
     server.serve_forever()
 
 if __name__ == "__main__":
-    # استارت وب‌سرور در ترد جداگانه
+    # استارت وب‌سرور برای روشن ماندن ۲۴ ساعته در رندر
     t = threading.Thread(target=run_server)
     t.daemon = True
     t.start()
     
     print("Server started. Sending startup message...")
-    # ارسال پیام تلگرام بلافاصله بعد از شروع
-    send_telegram_message("🤖 ربات معامله‌گری بیت‌پین روشن شد و آماده تست است!")
+    # ارسال پیام روشن شدن به تلگرام
+    send_telegram_message("🤖 ربات معامله‌گری بیت‌پین با موفقیت روشن شد!")
     
-    # حلقه برای بررسی قیمت و ارسال پیام
+    # حلقه اصلی چک کردن قیمت بیت‌پین
     while True:
         try:
             url = "https://api.bitpin.org/v1/mkt/markets/"
