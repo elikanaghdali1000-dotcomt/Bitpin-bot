@@ -346,18 +346,39 @@ if __name__ == "__main__":
     print("Web server started on port 10000.")
     send_telegram_message("🤖 <b>ربات جامع بیت‌پین (اسپات و تعهدی) با موفقیت روشن شد!</b> 🚀")
 
-    # لیست کامل ارزهای اسپات و تعهدی برتر
+    # لیست گسترده و جامع تمام ارزهای عالی و پرحجم اسپات بیت‌پین (USDT و IRT)
     spot_symbols = [
+        # ارزهای اصلی و سنگین اسپات
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
-        "AVAX_USDT", "LINK_USDT", "DOT_USDT", "TRX_USDT", "LTC_USDT", "NEAR_USDT",
-        "UNI_USDT", "ATOM_USDT", "SHIB_USDT", "PEPE_USDT", "TON_USDT", "SUI_USDT",
-        "BTC_IRT", "ETH_IRT", "SOL_IRT", "XRP_IRT", "DOGE_IRT", "SHIB_IRT"
+        "AVAX_USDT", "LINK_USDT", "DOT_USDT", "TRX_USDT", "LTC_USDT", "BCH_USDT",
+        "XLM_USDT", "ETC_USDT", "ALGO_USDT", "HBAR_USDT", "ICP_USDT",
+        
+        # ارزهای پرپتانسیل و داغ لایه یک و لایه دو
+        "NEAR_USDT", "UNI_USDT", "ATOM_USDT", "SUI_USDT", "APT_USDT", "ARB_USDT",
+        "OP_USDT", "INJ_USDT", "TIA_USDT", "FTM_USDT", "SEI_USDT", "STX_USDT",
+        "FIL_USDT", "TON_USDT", "KAS_USDT", "AR_USDT", "PYTH_USDT", "JUP_USDT",
+        
+        # میم‌کوین‌ها و هوش مصنوعی پرحجم اسپات
+        "SHIB_USDT", "PEPE_USDT", "FLOKI_USDT", "BONK_USDT", "WIF_USDT", "FET_USDT",
+        "RNDR_USDT", "ORDI_USDT",
+        
+        # دیفای، وب۳ و متاورس
+        "AAVE_USDT", "CRV_USDT", "DYDX_USDT", "SAND_USDT", "MANA_USDT", "GALA_USDT",
+        "CHZ_USDT", "AXS_USDT", "ENJ_USDT", "GMT_USDT",
+        
+        # جفت‌های تومانی برتر و پرحجم اسپات بیت‌پین (IRT)
+        "BTC_IRT", "ETH_IRT", "SOL_IRT", "XRP_IRT", "DOGE_IRT", "ADA_IRT",
+        "AVAX_IRT", "PEPE_IRT", "SHIB_IRT", "TON_IRT", "FLOKI_IRT", "TRX_IRT",
+        "LINK_IRT", "DOT_IRT", "NEAR_IRT", "SUI_IRT"
     ]
     
+    # ارزهای معامله تعهدی (مارجین) بیت‌پین با قابلیت لانگ و شورت
     margin_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
-        "AVAX_USDT", "LINK_USDT", "DOT_USDT", "NEAR_USDT", "UNI_USDT", "ATOM_USDT",
-        "SUI_USDT", "ARB_USDT", "OP_USDT", "INJ_USDT", "TIA_USDT", "FTM_USDT"
+        "AVAX_USDT", "LINK_USDT", "DOT_USDT", "TRX_USDT", "LTC_USDT", "BCH_USDT",
+        "NEAR_USDT", "UNI_USDT", "ATOM_USDT", "SUI_USDT", "APT_USDT", "ARB_USDT",
+        "OP_USDT", "INJ_USDT", "TIA_USDT", "FTM_USDT", "SEI_USDT", "STX_USDT",
+        "FIL_USDT", "TON_USDT", "PEPE_USDT", "SHIB_USDT", "FET_USDT", "RNDR_USDT"
     ]
 
     print(f"تعداد ارزهای اسپات: {len(spot_symbols)} | تعداد ارزهای تعهدی: {len(margin_symbols)}")
