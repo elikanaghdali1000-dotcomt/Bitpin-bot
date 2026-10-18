@@ -5,7 +5,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- تنظیمات تلگرام ---
-TELEGRAM_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"
+TELEGRAM_TOKEN = "*******"  # توکن تلگرام شما
 CHAT_ID = "6643451227"
 
 # --- تنظیمات استراتژی و ضد رنج هوشمند ---
@@ -14,10 +14,13 @@ LEVEL_TOLERANCE = 0.004
 PULLBACK_LOOKBACK = 10
 SQUEEZE_RATIO = 0.65
 
-# تنظیمات حد سود و ضرر برای بازارها
+# تنظیمات حد سود و ضرر برای بازارها (اسپات و تعهدی)
 SL_PERCENT = 0.015   # ۱.۵ درصد حد ضرر
 TP1_PERCENT = 0.0225 # ۲.۲۵ درصد حد سود اول
 TP2_PERCENT = 0.0375 # ۳.۷۵ درصد حد سود دوم
+
+# ضریب حجم درخواست شده
+VOLUME_MULTIPLIER = 0.85
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"}
 
@@ -41,9 +44,9 @@ def send_telegram_message(text):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
         response = requests.post(url, json=payload, timeout=5)
-        print(f"Telegram Message Status: {response.status_code}")
+        print("Telegram Startup Message Code:", response.status_code)
     except Exception as e:
-        print(f"Telegram Error: {e}")
+        print(f"Telegram Startup Error: {e}")
 
 
 # --- وب‌سرور برای زنده ماندن 24 ساعته در رندر ---
@@ -99,7 +102,7 @@ def calculate_adx_array(highs, lows, closes, period=14):
     return adx_list
 
 
-def validate_trend_and_volume(adx_array, volumes, index=-1, min_adx=20.0, dynamic_min_adx=16.0, volume_multiplier=0.85):
+def validate_trend_and_volume(adx_array, volumes, index=-1, min_adx=20.0, dynamic_min_adx=16.0):
     try:
         current_adx = adx_array[index]
         current_volume = volumes[index]
@@ -107,7 +110,7 @@ def validate_trend_and_volume(adx_array, volumes, index=-1, min_adx=20.0, dynami
         
         if current_adx >= min_adx:
             return True
-        if (current_adx >= dynamic_min_adx) and (current_volume >= (avg_volume * volume_multiplier)):
+        if (current_adx >= dynamic_min_adx) and (current_volume >= (avg_volume * VOLUME_MULTIPLIER)):
             return True
         return False
     except Exception as e:
@@ -118,7 +121,7 @@ def validate_trend_and_volume(adx_array, volumes, index=-1, min_adx=20.0, dynami
 def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, entry_min, entry_max, sl, tp1, tp2):
     emoji = "🟢" if side == "LONG" else "🔴"
     side_title = "خرید (لانگ)" if side == "LONG" else "فروش (شورت)"
-    market_label = "💎 بازار اسپات (Spot)" if market_type == "SPOT" else "⚡️ بازار تعهدی (Margin)"
+    market_label = "💎 بازار اسپات (Spot) - با حد ضرر و حد سود" if market_type == "SPOT" else "⚡️ بازار تعهدی (Margin)"
 
     message = (
         f"{emoji} <b>سیگنال {side_title} ({symbol})</b>\n"
@@ -135,20 +138,20 @@ def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, e
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
-        res = requests.post(url, json=payload, timeout=5)
-        print(f"🚀 سیگنال {symbol} ({side}) به تلگرام ارسال شد! وضعیت: {res.status_code}")
+        requests.post(url, json=payload, timeout=5)
     except Exception as e:
-        print(f"❌ خطا در ارسال سیگنال به تلگرام: {e}")
+        print(f"Telegram Error: {e}")
 
 
 def send_tp1_alert(symbol, market_type, side, current_price, tp1):
     side_fa = "خرید (لانگ)" if side == "LONG" else "فروش (شورت)"
+    market_label = "اسپات (Spot)" if market_type == "SPOT" else "تعهدی (Margin)"
     message = (
-        f"⚠️ <b>رسیدن به حد سود اول (TP1)! ({symbol})</b>\n"
-        f"📌 <b>بازار:</b> {market_type} | <b>جهت:</b> {side_fa}\n"
+        f"⚠️ <b>رسیدن به حد سود اول (TP1) و هشدار ریسک‌فری! ({symbol})</b>\n"
+        f"📌 <b>بازار:</b> {market_label} | <b>جهت:</b> {side_fa}\n"
         f"💵 <b>قیمت فعلی:</b> <code>{format_price(current_price)}</code>\n"
         f"🎯 <b>تارگت TP1:</b> <code>{format_price(tp1)}</code>\n\n"
-        f"👉 <b>برو صرافی و حد ضرر را ریسک‌فری کن!</b>"
+        f"👉 <b>برو صرافی حد ضرر را روی نقطه ورود (Free Risk) تنظیم کن!</b>"
     )
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
@@ -160,7 +163,7 @@ def send_tp1_alert(symbol, market_type, side, current_price, tp1):
 
 def get_market_trend():
     try:
-        url = "https://api.bitpin.org/api/v1/mkt/tv/history"
+        url = "https://api.bitpin.org/api/v1/mkt/tv/history/"
         params = {
             "symbol": "BTC_USDT",
             "from": int(time.time()) - 86400,
@@ -168,10 +171,6 @@ def get_market_trend():
             "resolution": "60",
         }
         res = requests.get(url, params=params, headers=HEADERS, timeout=7)
-        if res.status_code != 200:
-            print(f"⚠️ بیت‌پین برای روند کلی پاسخ نداد (کد {res.status_code})")
-            return "NEUTRAL"
-
         data = res.json()
         if not data or "c" not in data or len(data["c"]) < 20:
             return "NEUTRAL"
@@ -184,14 +183,13 @@ def get_market_trend():
             return "BEARISH"
         else:
             return "NEUTRAL"
-    except Exception as e:
-        print(f"خطا در محاسبه روند بیت‌کوین: {e}")
+    except Exception:
         return "NEUTRAL"
 
 
 def get_candles(symbol):
     try:
-        url = "https://api.bitpin.org/api/v1/mkt/tv/history"
+        url = "https://api.bitpin.org/api/v1/mkt/tv/history/"
         params = {
             "symbol": symbol,
             "from": int(time.time()) - 43200,
@@ -199,29 +197,20 @@ def get_candles(symbol):
             "resolution": "15",
         }
         res = requests.get(url, params=params, headers=HEADERS, timeout=7)
-        if res.status_code != 200:
-            print(f"⚠️ [{symbol}] پاسخ ناموفق بیت‌پین: کد {res.status_code}")
-            return []
-
         data = res.json()
         if data and "c" in data and len(data["c"]) > 0:
             candles_list = []
             for i in range(len(data["c"])):
                 candles_list.append({
-                    "close": float(data["c"][i]),
-                    "high": float(data["h"][i]),
-                    "low": float(data["l"][i]),
-                    "volume": float(data["v"][i]) if "v" in data and i < len(data["v"]) else 1.0,
+                    "close": data["c"][i],
+                    "high": data["h"][i],
+                    "low": data["l"][i],
+                    "volume": data["v"][i] if "v" in data and i < len(data["v"]) else 1.0,
                     "time": i
                 })
-            last_c = candles_list[-1]['close']
-            print(f"📊 [{symbol}] کندل دریافت شد ({len(candles_list)} عدد) | قیمت: {last_c}")
             return candles_list
-        else:
-            print(f"❌ [{symbol}] پاسخی با کندل خالی دریافت شد.")
-            return []
-    except Exception as e:
-        print(f"❌ خطای اتصال به بیت‌پین برای {symbol}: {e}")
+        return []
+    except Exception:
         return []
 
 
@@ -257,6 +246,7 @@ def analyze_market(symbol, market_type, candles, market_trend):
     last_candle_time = candles[-1].get("time", 0)
     current_price = closes[-1]
 
+    # بررسی هشدار رسیدن به TP1 و ریسک‌فری کردن برای تمامی بازارها (اسپات و تعهدی)
     for sig_key in list(last_signals.keys()):
         if sig_key.startswith(f"{symbol}_{market_type}"):
             saved_data = last_signals[sig_key]
@@ -299,6 +289,7 @@ def analyze_market(symbol, market_type, candles, market_trend):
     recent_high = max(highs[-PULLBACK_LOOKBACK:-1])
     recent_low = min(lows[-PULLBACK_LOOKBACK:-1])
 
+    # ۱. سناریوی خرید (LONG) - هم اسپات و هم تعهدی
     long_pattern = None
     if current_price > sma20:
         if is_squeeze and current_price > upper_band * 0.998:
@@ -324,6 +315,7 @@ def analyze_market(symbol, market_type, candles, market_trend):
                 send_telegram_signal(symbol, market_type, "LONG", current_price, long_pattern, market_trend, in_low, in_high, sl, tp1, tp2)
                 return
 
+    # ۲. سناریوی فروش شورت (SHORT) - فقط برای بازار تعهدی (Margin)
     if market_type == "MARGIN":
         short_pattern = None
         if current_price < sma20:
@@ -351,26 +343,28 @@ def analyze_market(symbol, market_type, candles, market_trend):
 
 
 if __name__ == "__main__":
+    # استارت وب‌سرور برای پایداری 24 ساعته در رندر
     server_thread = threading.Thread(target=run_server)
     server_thread.daemon = True
     server_thread.start()
     
     print("Web server started on port 10000.")
-    send_telegram_message("🤖 <b>ربات جامع بیت‌پین (اسپات و تعهدی) با موفقیت روشن شد!</b> 🚀")
+    send_telegram_message("🤖 <b>ربات جامع بیت‌پین (اسپات با حد ضرر و تعهدی) روشن شد!</b> 🚀")
 
+    # ۱۰۰ ارز معتبر و برتر بازار (پشتیبانی کامل USDT و IRT)
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
         "AVAX_USDT", "LINK_USDT", "DOT_USDT", "TRX_USDT", "LTC_USDT", "BCH_USDT",
-        "XLM_USDT", "ETC_USDT", "ALGO_USDT", "HBAR_USDT", "ICP_USDT",
-        "NEAR_USDT", "UNI_USDT", "ATOM_USDT", "SUI_USDT", "APT_USDT", "ARB_USDT",
-        "OP_USDT", "INJ_USDT", "TIA_USDT", "FTM_USDT", "SEI_USDT", "STX_USDT",
-        "FIL_USDT", "TON_USDT", "KAS_USDT", "AR_USDT", "PYTH_USDT", "JUP_USDT",
-        "SHIB_USDT", "PEPE_USDT", "FLOKI_USDT", "BONK_USDT", "WIF_USDT", "FET_USDT",
-        "RNDR_USDT", "ORDI_USDT", "AAVE_USDT", "CRV_USDT", "DYDX_USDT", "SAND_USDT",
-        "MANA_USDT", "GALA_USDT", "CHZ_USDT", "AXS_USDT", "ENJ_USDT", "GMT_USDT",
-        "BTC_IRT", "ETH_IRT", "SOL_IRT", "XRP_IRT", "DOGE_IRT", "ADA_IRT",
-        "AVAX_IRT", "PEPE_IRT", "SHIB_IRT", "TON_IRT", "FLOKI_IRT", "TRX_IRT",
-        "LINK_IRT", "DOT_IRT", "NEAR_IRT", "SUI_IRT"
+        "XLM_USDT", "ETC_USDT", "ALGO_USDT", "HBAR_USDT", "ICP_USDT", "NEAR_USDT",
+        "UNI_USDT", "ATOM_USDT", "SUI_USDT", "APT_USDT", "ARB_USDT", "OP_USDT",
+        "INJ_USDT", "TIA_USDT", "FTM_USDT", "SEI_USDT", "STX_USDT", "FIL_USDT",
+        "TON_USDT", "KAS_USDT", "AR_USDT", "PYTH_USDT", "JUP_USDT", "SHIB_USDT",
+        "PEPE_USDT", "FLOKI_USDT", "BONK_USDT", "WIF_USDT", "FET_USDT", "RNDR_USDT",
+        "ORDI_USDT", "AAVE_USDT", "CRV_USDT", "DYDX_USDT", "SAND_USDT", "MANA_USDT",
+        "GALA_USDT", "CHZ_USDT", "AXS_USDT", "ENJ_USDT", "GMT_USDT", "BTC_IRT",
+        "ETH_IRT", "SOL_IRT", "XRP_IRT", "DOGE_IRT", "ADA_IRT", "AVAX_IRT",
+        "PEPE_IRT", "SHIB_IRT", "TON_IRT", "FLOKI_IRT", "TRX_IRT", "LINK_IRT",
+        "DOT_IRT", "NEAR_IRT", "SUI_IRT"
     ]
     
     margin_symbols = [
@@ -390,23 +384,24 @@ if __name__ == "__main__":
         try:
             if time.time() - last_trend_check >= 900 or last_trend_check == 0:
                 market_trend = get_market_trend()
-                print(f"🌍 وضعیت کلی بازار بیت‌کوین (یک‌ساعته): {market_trend}")
+                print(f"Market Trend (1H): {market_trend}")
                 last_trend_check = time.time()
 
+            # بررسی بازار اسپات (با حد ضرر و حد سود)
             for sym in spot_symbols:
                 candles = get_candles(sym)
                 if candles:
                     analyze_market(sym, "SPOT", candles, market_trend)
                 time.sleep(0.3)
 
+            # بررسی بازار تعهدی (لانگ و شورت)
             for sym in margin_symbols:
                 candles = get_candles(sym)
                 if candles:
                     analyze_market(sym, "MARGIN", candles, market_trend)
                 time.sleep(0.3)
 
-            print("🔄 یک دور کامل اسکن بازار انجام شد. استراحت ۲۰ ثانیه‌ای...")
             time.sleep(20)
         except Exception as e:
-            print(f"❌ خطای حلقه اصلی برنامه: {e}")
+            print(f"Main loop error: {e}")
             time.sleep(10)
