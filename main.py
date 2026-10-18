@@ -5,7 +5,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- تنظیمات تلگرام ---
-TELEGRAM_TOKEN = "*******"  # توکن تلگرام شما
+TELEGRAM_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"  # توکن تلگرام شما
 CHAT_ID = "6643451227"
 
 # --- تنظیمات استراتژی و ضد رنج هوشمند ---
