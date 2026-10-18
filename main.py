@@ -1,16 +1,16 @@
-import os
 import time
 import requests
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
+# توکن و چت‌آیدی شما مستقیماً اینجا قرار گرفت
 TELEGRAM_TOKEN = "*******"
 CHAT_ID = "6643451227"
 
 def send_telegram_message(text):
     try:
-        url = f"https://api.telegram.org/8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo}/sendMessage"
-        payload = {"chat_id": CHAT_ID, "6643451227": text, "parse_mode": "Markdown"}
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
         response = requests.post(url, json=payload, timeout=10)
         print("Telegram Response Code:", response.status_code)
         print("Telegram Response Body:", response.text)
@@ -28,7 +28,7 @@ def run_server():
     server.serve_forever()
 
 if __name__ == "__main__":
-    # استارت وب‌سرور در پس‌زمینه
+    # استارت وب‌سرور در پس‌زمینه برای رندر
     t = threading.Thread(target=run_server)
     t.daemon = True
     t.start()
@@ -37,6 +37,6 @@ if __name__ == "__main__":
     # ارسال پیام تلگرام بلافاصله بعد از شروع
     send_telegram_message("🤖 **ربات معامله‌گری بیت‌پین با موفقیت روشن شد!** پیام تست برقرار است.")
     
-    # حلقه ساده برای زنده نگه داشتن برنامه
+    # حلقه ساده برای زنده نگه داشتن ربات
     while True:
         time.sleep(60)
