@@ -99,7 +99,7 @@ def calculate_adx_array(highs, lows, closes, period=14):
     return adx_list
 
 
-def validate_trend_and_volume(adx_array, volumes, index=-1, min_adx=20.0, dynamic_min_adx=16.0, volume_multiplier=1.4):
+def validate_trend_and_volume(adx_array, volumes, index=-1, min_adx=20.0, dynamic_min_adx=16.0, volume_multiplier=.85):
     try:
         current_adx = adx_array[index]
         current_volume = volumes[index]
