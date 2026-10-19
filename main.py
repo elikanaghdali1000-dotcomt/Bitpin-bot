@@ -17,11 +17,12 @@ PULLBACK_TOLERANCE = 0.003
 LEVEL_TOLERANCE = 0.008
 PULLBACK_LOOKBACK = 10
 SQUEEZE_RATIO = 0.35
+MIN_BANDWIDTH = 0.008   # 🚫 فیلتر جدید ضد رنج: جلوگیری از سیگنال در بازارهای مرده و کم‌نوسان
 
 SL_PERCENT = 0.015    # ۱.۵ درصد حد ضرر
 TP1_PERCENT = 0.0225  # ۲.۲۵ درصد حد سود اول
 TP2_PERCENT = 0.0375  # ۳.۷۵ درصد حد سود دوم
-VOLUME_MULTIPLIER = 4
+VOLUME_MULTIPLIER = 4.0  # ضریب حجم سنگین (روی ۴ تنظیم شده)
 
 # --- ضد اسپم / ضد تکرار ---
 SIGNAL_COOLDOWN_SEC = 45 * 60   # ۴۵ دقیقه کول‌داون برای هر ارز/جهت
@@ -35,7 +36,6 @@ HEADERS = {
 session = requests.Session()
 session.headers.update(HEADERS)
 
-# ساختار پاک‌سازی شده برای کنترل سیگنال‌های تکراری
 last_signals = {}
 tp1_notified = {}
 
@@ -59,7 +59,6 @@ def send_telegram_message(text):
         print(f"Telegram error: {e}")
         return False
 
-# --- وب‌سرور سبک متصل به پورت محیطی Render ---
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -68,7 +67,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"Bitpin Trading Bot is Active & Running!")
 
     def log_message(self, format, *args):
-        return  # خاموش کردن لاگ اضافه برای درخواست‌های پینگ
+        return
 
 def run_server():
     port = int(os.getenv("PORT", 10000))
@@ -76,7 +75,6 @@ def run_server():
     print(f"Web server started on 0.0.0.0:{port}")
     server.serve_forever()
 
-# --- سیستم بیدار نگه‌داشتن سرور (Keep-Alive) ---
 def keep_alive_ping():
     time.sleep(30)
     while True:
@@ -90,7 +88,7 @@ def keep_alive_ping():
                 requests.get(f"http://127.0.0.1:{port}", timeout=5)
         except Exception as e:
             print(f"Keep-Alive ping warning: {e}")
-        time.sleep(480)  # هر ۸ دقیقه یک‌بار
+        time.sleep(480)
 
 def calculate_adx_array(highs, lows, closes, period=14):
     adx_list = [0.0] * len(closes)
@@ -227,7 +225,6 @@ def analyze_market(symbol, market_type, candles, market_trend):
     last_candle_time = candles[-1]["time"]
     current_price = closes[-1]
 
-    # --- بررسی هوشمند TP1 و ریسک‌فری بر اساس کلید پایدار ---
     base_key_long = f"{symbol}_{market_type}_LONG"
     base_key_short = f"{symbol}_{market_type}_SHORT"
 
@@ -253,6 +250,13 @@ def analyze_market(symbol, market_type, candles, market_trend):
     upper_band = sma20 + (2 * std_dev)
     lower_band = sma20 - (2 * std_dev)
 
+    # محاسبه پهنای باند بولینگر
+    current_bandwidth = (upper_band - lower_band) / sma20 if sma20 > 0 else 0
+
+    # 🚫 فیلتر ضد رنج: اگر نوسان و پهنای باند کمتر از حد مجاز باشد، ارز کلاً رد می‌شود
+    if current_bandwidth < MIN_BANDWIDTH:
+        return
+
     adx_array = calculate_adx_array(highs, lows, closes)
     trend_volume_valid = validate_trend_and_volume(adx_array, volumes)
 
@@ -269,7 +273,6 @@ def analyze_market(symbol, market_type, candles, market_trend):
             s = math.sqrt(v)
             bandwidths.append(((m + 2 * s) - (m - 2 * s)) / m if m > 0 else 0)
 
-    current_bandwidth = (upper_band - lower_band) / sma20 if sma20 > 0 else 0
     max_recent_bw = max(bandwidths) if bandwidths else current_bandwidth
     is_squeeze = current_bandwidth <= (max_recent_bw * SQUEEZE_RATIO)
 
@@ -317,7 +320,7 @@ def analyze_market(symbol, market_type, candles, market_trend):
         send_telegram_signal(symbol, market_type, "LONG", current_price, long_pattern, market_trend, in_low, in_high, sl, tp1, tp2)
         return
 
-    # --- بررسی الگوریتم شورت (مخصوص بازار تعهدی) ---
+    # --- بررسی الگوریتم شورت ---
     if market_type == "MARGIN":
         short_pattern = None
         if current_price < sma20:
@@ -364,7 +367,7 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    send_telegram_message("🤖 <b>ربات سیگنال‌ده بیت‌پین فعال شد (آپدیت ضد اسپم و حجم ۳.۲)!</b> 🚀")
+    send_telegram_message("🤖 <b>ربات با فیلتر جدید پهنای باند و ضریب حجم ۴.۰ آپدیت شد!</b> 🚀")
 
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
