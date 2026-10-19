@@ -21,7 +21,7 @@ SQUEEZE_RATIO = 0.35
 SL_PERCENT = 0.015    # ۱.۵ درصد حد ضرر
 TP1_PERCENT = 0.0225  # ۲.۲۵ درصد حد سود اول
 TP2_PERCENT = 0.0375  # ۳.۷۵ درصد حد سود دوم
-VOLUME_MULTIPLIER =2.2
+VOLUME_MULTIPLIER =3.2
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
