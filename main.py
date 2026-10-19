@@ -1,3 +1,4 @@
+import time
 import requests
 
 headers = {
@@ -5,28 +6,38 @@ headers = {
     "Accept": "application/json"
 }
 
-def check_multiple_coins():
-    url = "https://api.bitpin.org/api/v1/mkt/tickers/"
-    res = requests.get(url, headers=headers, timeout=10)
+def get_official_candles(symbol, timeframe="15m"):
+    now = int(time.time())
+    url = "https://api.bitpin.org/api/v1/mkt/candles/"
+    params = {
+        "symbol": symbol,
+        "from": now - 43200,  # ۱۲ ساعت قبل
+        "to": now,
+        "res": timeframe      # 15m
+    }
     
-    if res.status_code == 200:
-        data = res.json()
-        print(f"✅ کلاً {len(data)} جفت‌ارز از بیت‌پین دریافت شد.\n")
-        
-        # چند ارز نمونه برای تست تتری و تومانی
-        test_symbols = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "DOGE_USDT", "BTC_IRT", "ETH_IRT"]
-        
-        # تبدیل لیست به دیکشنری برای جستجوی سریع با نماد
-        ticker_dict = {item.get("symbol"): item.get("price") for item in data}
-        
-        for sym in test_symbols:
-            price = ticker_dict.get(sym)
-            if price:
-                print(f"🔸 نماد {sym:10} -> قیمت: {price}")
+    try:
+        res = requests.get(url, params=params, headers=headers, timeout=8)
+        if res.status_code == 200:
+            data = res.json()
+            # بیت‌پین پاسخ را به صورت لیست مستقیم از کندل‌ها برمی‌گرداند
+            if isinstance(data, list) and len(data) > 0:
+                last_c = data[-1]
+                print(f"✅ [{symbol}] تعداد کندل: {len(data)} | کلوز: {last_c.get('close')} | حجم: {last_c.get('volume')}")
+                return True
             else:
-                print(f"❌ نماد {sym:10} -> یافت نشد!")
-    else:
-        print(f"خطا در ارتباط: {res.status_code}")
+                print(f"⚠️ [{symbol}] پاسخ خالی بود (ممکن است این نماد در بازار تتری موجود نباشد).")
+        else:
+            print(f"❌ [{symbol}] خطا با کد: {res.status_code}")
+    except Exception as e:
+        print(f"❌ [{symbol}] خطای شبکه: {e}")
+    return False
 
 if __name__ == "__main__":
-    check_multiple_coins()
+    print("--- تست دریافت کندل از اندپوینت رسمی بیت‌پین ---\n")
+    # ارزهایی که قبلاً خطا دادند را تست می‌کنیم:
+    test_coins = ["BTC_USDT", "ETH_USDT", "PEPE_USDT", "SHIB_USDT", "FET_USDT", "PEPE_IRT", "SHIB_IRT"]
+    
+    for coin in test_coins:
+        get_official_candles(coin)
+        time.sleep(0.3)
