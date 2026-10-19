@@ -6,7 +6,7 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- تنظیمات تلگرام ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "7711422709:AAHgvMvQ6s_WcQhK3R9eR7Yq8kU1m2o3p4A")
+TELEGRAM_TOKEN = os.getenv("8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo", "7711422709:AAHgvMvQ6s_WcQhK3R9eR7Yq8kU1m2o3p4A")
 CHAT_ID = os.getenv("CHAT_ID", "6643451227")
 
 # اگر آدرس عمومی رندر داری اینجا بگذار یا به صورت Environment Variable در رندر ست کن
