@@ -21,7 +21,7 @@ SQUEEZE_RATIO = 0.35
 SL_PERCENT = 0.015    # ۱.۵ درصد حد ضرر
 TP1_PERCENT = 0.0225  # ۲.۲۵ درصد حد سود اول
 TP2_PERCENT = 0.0375  # ۳.۷۵ درصد حد سود دوم
-VOLUME_MULTIPLIER = 3.2
+VOLUME_MULTIPLIER = 4
 
 # --- ضد اسپم / ضد تکرار ---
 SIGNAL_COOLDOWN_SEC = 45 * 60   # ۴۵ دقیقه کول‌داون برای هر ارز/جهت
