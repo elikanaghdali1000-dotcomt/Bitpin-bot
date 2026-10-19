@@ -5,14 +5,14 @@ import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- تنظیمات تلگرام ---
-TELEGRAM_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"  # توکن تلگرام شما
+TELEGRAM_TOKEN = "*******"  # توکن تلگرام شما
 CHAT_ID = "6643451227"
 
-# --- تنظیمات استراتژی و ضد رنج هوشمند ---
-PULLBACK_TOLERANCE = 0.003
-LEVEL_TOLERANCE = 0.004
+# --- تنظیمات استراتژی و ضد رنج هوشمند (تنظیم متعادل) ---
+PULLBACK_TOLERANCE = 0.007
+LEVEL_TOLERANCE = 0.008
 PULLBACK_LOOKBACK = 10
-SQUEEZE_RATIO = 0.65
+SQUEEZE_RATIO = 0.75
 
 # تنظیمات حد سود و ضرر برای بازارها (اسپات و تعهدی)
 SL_PERCENT = 0.015   # ۱.۵ درصد حد ضرر
@@ -102,7 +102,7 @@ def calculate_adx_array(highs, lows, closes, period=14):
     return adx_list
 
 
-def validate_trend_and_volume(adx_array, volumes, index=-1, min_adx=20.0, dynamic_min_adx=16.0):
+def validate_trend_and_volume(adx_array, volumes, index=-1, min_adx=18.0, dynamic_min_adx=14.0):
     try:
         current_adx = adx_array[index]
         current_volume = volumes[index]
@@ -138,7 +138,8 @@ def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, e
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
-        requests.post(url, json=payload, timeout=5)
+        response = requests.post(url, json=payload, timeout=5)
+        print(f"Telegram Signal [{symbol} | {market_type} | {side}] Code: {response.status_code}")
     except Exception as e:
         print(f"Telegram Error: {e}")
 
@@ -268,7 +269,17 @@ def analyze_market(symbol, market_type, candles, market_trend):
     lower_band = sma20 - (2 * std_dev)
 
     adx_array = calculate_adx_array(highs, lows, closes)
-    if not validate_trend_and_volume(adx_array, volumes):
+    trend_volume_valid = validate_trend_and_volume(adx_array, volumes)
+
+    # نمایش لاگ فقط برای بیت کوین و اتریوم جهت شفافیت کارکرد فیلتر در رندر
+    if symbol in ("BTC_USDT", "ETH_USDT"):
+        cur_adx = adx_array[-1]
+        avg_v = sum(volumes[-6:-1]) / 5.0 if len(volumes) >= 6 else volumes[-1]
+        v_ratio = volumes[-1] / avg_v if avg_v > 0 else 0
+        status_txt = "PASS" if trend_volume_valid else "REJECT"
+        print(f"DEBUG [{symbol} | {market_type}] ADX={cur_adx:.2f} | VolRatio={v_ratio:.2f} | Status={status_txt}")
+
+    if not trend_volume_valid:
         return
 
     bandwidths = []
@@ -392,6 +403,8 @@ if __name__ == "__main__":
                 candles = get_candles(sym)
                 if candles:
                     analyze_market(sym, "SPOT", candles, market_trend)
+                else:
+                    print(f"⚠️ [{sym}] No candle data (Empty/Error)")
                 time.sleep(0.3)
 
             # بررسی بازار تعهدی (لانگ و شورت)
@@ -399,6 +412,8 @@ if __name__ == "__main__":
                 candles = get_candles(sym)
                 if candles:
                     analyze_market(sym, "MARGIN", candles, market_trend)
+                else:
+                    print(f"⚠️ [{sym}] No candle data (Empty/Error)")
                 time.sleep(0.3)
 
             time.sleep(20)
