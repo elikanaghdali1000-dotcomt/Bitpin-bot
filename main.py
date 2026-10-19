@@ -21,7 +21,11 @@ SQUEEZE_RATIO = 0.35
 SL_PERCENT = 0.015    # ۱.۵ درصد حد ضرر
 TP1_PERCENT = 0.0225  # ۲.۲۵ درصد حد سود اول
 TP2_PERCENT = 0.0375  # ۳.۷۵ درصد حد سود دوم
-VOLUME_MULTIPLIER =3.2
+VOLUME_MULTIPLIER = 3.2
+
+# --- ضد اسپم / ضد تکرار ---
+SIGNAL_COOLDOWN_SEC = 45 * 60   # ۴۵ دقیقه کول‌داون برای هر ارز/جهت
+REPEAT_SAME_PATTERN_BLOCK = True
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -31,6 +35,7 @@ HEADERS = {
 session = requests.Session()
 session.headers.update(HEADERS)
 
+# ساختار پاک‌سازی شده برای کنترل سیگنال‌های تکراری
 last_signals = {}
 tp1_notified = {}
 
@@ -222,19 +227,25 @@ def analyze_market(symbol, market_type, candles, market_trend):
     last_candle_time = candles[-1]["time"]
     current_price = closes[-1]
 
-    for sig_key in list(last_signals.keys()):
-        if sig_key.startswith(f"{symbol}_{market_type}"):
-            saved_data = last_signals[sig_key]
-            side = saved_data["side"]
-            tp1 = saved_data["tp1"]
+    # --- بررسی هوشمند TP1 و ریسک‌فری بر اساس کلید پایدار ---
+    base_key_long = f"{symbol}_{market_type}_LONG"
+    base_key_short = f"{symbol}_{market_type}_SHORT"
 
-            if not tp1_notified.get(sig_key, False):
-                if side == "LONG" and current_price >= tp1 * 0.998:
-                    send_tp1_alert(symbol, market_type, "LONG", current_price, tp1)
-                    tp1_notified[sig_key] = True
-                elif side == "SHORT" and current_price <= tp1 * 1.002:
-                    send_tp1_alert(symbol, market_type, "SHORT", current_price, tp1)
-                    tp1_notified[sig_key] = True
+    for base_key in (base_key_long, base_key_short):
+        saved = last_signals.get(base_key)
+        if not saved:
+            continue
+
+        side = saved["side"]
+        tp1 = saved["tp1"]
+
+        if not tp1_notified.get(base_key, False):
+            if side == "LONG" and current_price >= tp1 * 0.998:
+                send_tp1_alert(symbol, market_type, "LONG", current_price, tp1)
+                tp1_notified[base_key] = True
+            elif side == "SHORT" and current_price <= tp1 * 1.002:
+                send_tp1_alert(symbol, market_type, "SHORT", current_price, tp1)
+                tp1_notified[base_key] = True
 
     sma20 = sum(closes[-20:]) / 20.0
     variance = sum((x - sma20) ** 2 for x in closes[-20:]) / 20.0
@@ -266,6 +277,7 @@ def analyze_market(symbol, market_type, candles, market_trend):
     recent_high = max(highs[-PULLBACK_LOOKBACK:-1])
     recent_low = min(lows[-PULLBACK_LOOKBACK:-1])
 
+    # --- بررسی الگوریتم لانگ ---
     long_pattern = None
     if current_price > sma20:
         if is_squeeze and current_price > upper_band * 0.998:
@@ -276,20 +288,36 @@ def analyze_market(symbol, market_type, candles, market_trend):
             long_pattern = "Pullback to SMA20"
 
     if long_pattern:
-        sig_id = f"{symbol}_{market_type}_LONG_{last_candle_time}"
-        if sig_id not in last_signals:
-            sl = current_price * (1 - SL_PERCENT)
-            tp1 = current_price * (1 + TP1_PERCENT)
-            tp2 = current_price * (1 + TP2_PERCENT)
-            in_low = current_price * 0.997
-            in_high = current_price * 0.999
+        base_key = f"{symbol}_{market_type}_LONG"
+        now_ts = time.time()
 
-            last_signals[sig_id] = {"side": "LONG", "tp1": tp1}
-            tp1_notified[sig_id] = False
+        prev = last_signals.get(base_key)
+        if prev:
+            if now_ts - prev.get("ts", 0) < SIGNAL_COOLDOWN_SEC:
+                return
+            if REPEAT_SAME_PATTERN_BLOCK and prev.get("pattern") == long_pattern:
+                return
 
-            send_telegram_signal(symbol, market_type, "LONG", current_price, long_pattern, market_trend, in_low, in_high, sl, tp1, tp2)
-            return
+        sl = current_price * (1 - SL_PERCENT)
+        tp1 = current_price * (1 + TP1_PERCENT)
+        tp2 = current_price * (1 + TP2_PERCENT)
+        in_low = current_price * 0.997
+        in_high = current_price * 0.999
 
+        last_signals[base_key] = {
+            "side": "LONG",
+            "tp1": tp1,
+            "pattern": long_pattern,
+            "price": current_price,
+            "ts": now_ts,
+            "candle_time": last_candle_time
+        }
+        tp1_notified[base_key] = False
+
+        send_telegram_signal(symbol, market_type, "LONG", current_price, long_pattern, market_trend, in_low, in_high, sl, tp1, tp2)
+        return
+
+    # --- بررسی الگوریتم شورت (مخصوص بازار تعهدی) ---
     if market_type == "MARGIN":
         short_pattern = None
         if current_price < sma20:
@@ -301,18 +329,33 @@ def analyze_market(symbol, market_type, candles, market_trend):
                 short_pattern = "Pullback to SMA20"
 
         if short_pattern:
-            sig_id = f"{symbol}_{market_type}_SHORT_{last_candle_time}"
-            if sig_id not in last_signals:
-                sl = current_price * (1 + SL_PERCENT)
-                tp1 = current_price * (1 - TP1_PERCENT)
-                tp2 = current_price * (1 - TP2_PERCENT)
-                in_low = current_price * 1.001
-                in_high = current_price * 1.003
+            base_key = f"{symbol}_{market_type}_SHORT"
+            now_ts = time.time()
 
-                last_signals[sig_id] = {"side": "SHORT", "tp1": tp1}
-                tp1_notified[sig_id] = False
+            prev = last_signals.get(base_key)
+            if prev:
+                if now_ts - prev.get("ts", 0) < SIGNAL_COOLDOWN_SEC:
+                    return
+                if REPEAT_SAME_PATTERN_BLOCK and prev.get("pattern") == short_pattern:
+                    return
 
-                send_telegram_signal(symbol, market_type, "SHORT", current_price, short_pattern, market_trend, in_low, in_high, sl, tp1, tp2)
+            sl = current_price * (1 + SL_PERCENT)
+            tp1 = current_price * (1 - TP1_PERCENT)
+            tp2 = current_price * (1 - TP2_PERCENT)
+            in_low = current_price * 1.001
+            in_high = current_price * 1.003
+
+            last_signals[base_key] = {
+                "side": "SHORT",
+                "tp1": tp1,
+                "pattern": short_pattern,
+                "price": current_price,
+                "ts": now_ts,
+                "candle_time": last_candle_time
+            }
+            tp1_notified[base_key] = False
+
+            send_telegram_signal(symbol, market_type, "SHORT", current_price, short_pattern, market_trend, in_low, in_high, sl, tp1, tp2)
 
 if __name__ == "__main__":
     server_thread = threading.Thread(target=run_server, daemon=True)
@@ -321,7 +364,7 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    send_telegram_message("🤖 <b>ربات سیگنال‌ده بیت‌پین فعال شد!</b> 🚀")
+    send_telegram_message("🤖 <b>ربات سیگنال‌ده بیت‌پین فعال شد (آپدیت ضد اسپم و حجم ۳.۲)!</b> 🚀")
 
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
@@ -351,7 +394,7 @@ if __name__ == "__main__":
 
     while True:
         try:
-            if len(last_signals) > 500:
+            if len(last_signals) > 200:
                 last_signals.clear()
                 tp1_notified.clear()
 
