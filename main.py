@@ -12,16 +12,13 @@ CHAT_ID = "6643451227"
 # آدرس عمومی رندر برای پینگ Keep-Alive
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
-# --- تنظیمات استراتژی و ضد رنج هوشمند ---
-PULLBACK_TOLERANCE = 0.003
-LEVEL_TOLERANCE = 0.008
-PULLBACK_LOOKBACK = 10
+# --- تنظیمات استراتژی و ضد رنج هوشمند (فقط روند اصلی) ---
 SQUEEZE_RATIO = 0.35
-MIN_BANDWIDTH = 0.008   # 🚫 فیلتر جدید ضد رنج: جلوگیری از سیگنال در بازارهای مرده و کم‌نوسان
+MIN_BANDWIDTH = 0.008   # 🚫 فیلتر ضد رنج: جلوگیری از سیگنال در بازارهای مرده و کم‌نوسان
 
-SL_PERCENT = 0.015    # ۱.۵ درصد حد ضرر
-TP1_PERCENT = 0.0225  # ۲.۲۵ درصد حد سود اول
-TP2_PERCENT = 0.0375  # ۳.۷۵ درصد حد سود دوم
+SL_PERCENT = 0.012    # ۱.۵ درصد حد ضرر
+TP1_PERCENT = 0.010  # ۲.۲۵ درصد حد سود اول
+TP2_PERCENT = 0.020  # ۳.۷۵ درصد حد سود دوم
 VOLUME_MULTIPLIER = 4.0  # ضریب حجم سنگین (روی ۴ تنظیم شده)
 
 # --- ضد اسپم / ضد تکرار ---
@@ -151,7 +148,7 @@ def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, e
         f"{emoji} <b>سیگنال {side_title} ({symbol})</b>\n"
         f"📌 <b>نوع بازار:</b> {market_label}\n"
         f"💵 <b>قیمت فعلی:</b> <code>{format_price(price)}</code>\n"
-        f"📊 <b>الگو:</b> {pattern}\n\n"
+        f"📊 <b>الگو (روند اصلی):</b> {pattern}\n\n"
         f"🎯 <b>محدوده ورود:</b> <code>{format_price(entry_min)}</code> - <code>{format_price(entry_max)}</code>\n"
         f"📉 <b>حد سود اول (TP1):</b> <code>{format_price(tp1)}</code>\n"
         f"🚀 <b>حد سود دوم (TP2):</b> <code>{format_price(tp2)}</code>\n"
@@ -253,7 +250,7 @@ def analyze_market(symbol, market_type, candles, market_trend):
     # محاسبه پهنای باند بولینگر
     current_bandwidth = (upper_band - lower_band) / sma20 if sma20 > 0 else 0
 
-    # 🚫 فیلتر ضد رنج: اگر نوسان و پهنای باند کمتر از حد مجاز باشد، ارز کلاً رد می‌شود
+    # 🚫 فیلتر ضد رنج
     if current_bandwidth < MIN_BANDWIDTH:
         return
 
@@ -276,19 +273,11 @@ def analyze_market(symbol, market_type, candles, market_trend):
     max_recent_bw = max(bandwidths) if bandwidths else current_bandwidth
     is_squeeze = current_bandwidth <= (max_recent_bw * SQUEEZE_RATIO)
 
-    dist_to_sma = abs(current_price - sma20) / sma20
-    recent_high = max(highs[-PULLBACK_LOOKBACK:-1])
-    recent_low = min(lows[-PULLBACK_LOOKBACK:-1])
-
-    # --- بررسی الگوریتم لانگ ---
+    # --- بررسی الگوریتم لانگ (فقط روند صعودی و شکست مقاومتی هم‌جهت) ---
     long_pattern = None
     if current_price > sma20:
         if is_squeeze and current_price > upper_band * 0.998:
-            long_pattern = "Explosive Breakout"
-        elif abs(current_price - recent_high) / recent_high <= LEVEL_TOLERANCE:
-            long_pattern = "Pullback to Res"
-        elif dist_to_sma <= PULLBACK_TOLERANCE:
-            long_pattern = "Pullback to SMA20"
+            long_pattern = "Explosive Breakout (Trend Follow)"
 
     if long_pattern:
         base_key = f"{symbol}_{market_type}_LONG"
@@ -320,16 +309,12 @@ def analyze_market(symbol, market_type, candles, market_trend):
         send_telegram_signal(symbol, market_type, "LONG", current_price, long_pattern, market_trend, in_low, in_high, sl, tp1, tp2)
         return
 
-    # --- بررسی الگوریتم شورت ---
+    # --- بررسی الگوریتم شورت (فقط روند نزولی و شکست حمایتی هم‌جهت) ---
     if market_type == "MARGIN":
         short_pattern = None
         if current_price < sma20:
             if is_squeeze and current_price < lower_band * 1.002:
-                short_pattern = "Explosive Breakdown"
-            elif abs(current_price - recent_low) / recent_low <= LEVEL_TOLERANCE:
-                short_pattern = "Pullback to Sup"
-            elif dist_to_sma <= PULLBACK_TOLERANCE:
-                short_pattern = "Pullback to SMA20"
+                short_pattern = "Explosive Breakdown (Trend Follow)"
 
         if short_pattern:
             base_key = f"{symbol}_{market_type}_SHORT"
@@ -367,7 +352,7 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    send_telegram_message("🤖 <b>ربات با فیلتر جدید پهنای باند و ضریب حجم ۴.۰ آپدیت شد!</b> 🚀")
+    send_telegram_message("🤖 <b>ربات روی حالت خالصِ موج‌سواری با روند (Trend-Following) تنظیم شد!</b> 🚀")
 
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
@@ -395,7 +380,7 @@ if __name__ == "__main__":
     last_trend_check = 0
     market_trend = "NEUTRAL"
 
-    while True:
+    while type(True) is bool:
         try:
             if len(last_signals) > 200:
                 last_signals.clear()
