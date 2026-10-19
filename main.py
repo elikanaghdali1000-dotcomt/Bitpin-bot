@@ -5,12 +5,12 @@ import requests
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# --- تنظیمات تلگرام ---
-TELEGRAM_TOKEN = os.getenv("8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo", "7711422709:AAHgvMvQ6s_WcQhK3R9eR7Yq8kU1m2o3p4A")
-CHAT_ID = os.getenv("CHAT_ID", "6643451227")
+# --- تنظیمات تلگرام (ثابت‌شده) ---
+TELEGRAM_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"
+CHAT_ID = "6643451227"
 
-# اگر آدرس عمومی رندر داری اینجا بگذار یا به صورت Environment Variable در رندر ست کن
-APP_URL = os.getenv("APP_URL", "")
+# آدرس عمومی رندر برای پینگ Keep-Alive
+APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 # --- تنظیمات استراتژی و ضد رنج هوشمند ---
 PULLBACK_TOLERANCE = 0.007
@@ -169,13 +169,12 @@ def send_tp1_alert(symbol, market_type, side, current_price, tp1):
     )
     send_telegram_message(message)
 
-# اندپوینت جدید و رسمی دریافت کندل‌ها
 def get_candles(symbol, timeframe="15m"):
     now = int(time.time())
     url = "https://api.bitpin.org/api/v1/mkt/candles/"
     params = {
         "symbol": symbol,
-        "from": now - 43200,  # ۱۲ ساعت قبل
+        "from": now - 43200,
         "to": now,
         "res": timeframe
     }
@@ -223,7 +222,6 @@ def analyze_market(symbol, market_type, candles, market_trend):
     last_candle_time = candles[-1]["time"]
     current_price = closes[-1]
 
-    # ۱. بررسی رسیدن به TP1
     for sig_key in list(last_signals.keys()):
         if sig_key.startswith(f"{symbol}_{market_type}"):
             saved_data = last_signals[sig_key]
@@ -238,7 +236,6 @@ def analyze_market(symbol, market_type, candles, market_trend):
                     send_tp1_alert(symbol, market_type, "SHORT", current_price, tp1)
                     tp1_notified[sig_key] = True
 
-    # ۲. محاسبه اندیکاتورها
     sma20 = sum(closes[-20:]) / 20.0
     variance = sum((x - sma20) ** 2 for x in closes[-20:]) / 20.0
     std_dev = math.sqrt(variance)
@@ -251,7 +248,6 @@ def analyze_market(symbol, market_type, candles, market_trend):
     if not trend_volume_valid:
         return
 
-    # فشردگی بولینگر باند
     bandwidths = []
     for i in range(15, 0, -1):
         idx = -i
@@ -270,7 +266,6 @@ def analyze_market(symbol, market_type, candles, market_trend):
     recent_high = max(highs[-PULLBACK_LOOKBACK:-1])
     recent_low = min(lows[-PULLBACK_LOOKBACK:-1])
 
-    # ۳. سیگنال لانگ (اسپات و تعهدی)
     long_pattern = None
     if current_price > sma20:
         if is_squeeze and current_price > upper_band * 0.998:
@@ -295,7 +290,6 @@ def analyze_market(symbol, market_type, candles, market_trend):
             send_telegram_signal(symbol, market_type, "LONG", current_price, long_pattern, market_trend, in_low, in_high, sl, tp1, tp2)
             return
 
-    # ۴. سیگنال شورت (فقط بازار تعهدی)
     if market_type == "MARGIN":
         short_pattern = None
         if current_price < sma20:
@@ -366,14 +360,12 @@ if __name__ == "__main__":
                 print(f"[{time.strftime('%H:%M:%S')}] Bitcoin Trend (1H): {market_trend}")
                 last_trend_check = time.time()
 
-            # اسکن بازار اسپات
             for sym in spot_symbols:
                 candles = get_candles(sym)
                 if candles:
                     analyze_market(sym, "SPOT", candles, market_trend)
                 time.sleep(0.2)
 
-            # اسکن بازار تعهدی
             for sym in margin_symbols:
                 candles = get_candles(sym)
                 if candles:
