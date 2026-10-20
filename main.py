@@ -92,6 +92,20 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=2.0):
     if len(candles) < 50:
         return "HOLD", "داده‌های کندل کافی نیست"
 
+    # --- فیلتر زمانی جدید: بررسی حجم و سیگنال فقط در ۳ دقیقه پایانی کندل ۱۵ دقیقه‌ای ---
+    last_candle = candles[-1]
+    candle_time = last_candle.get("time", 0)
+    if candle_time > 0:
+        now_ts = time.time()
+        candle_duration = 15 * 60  # ۹۰۰ ثانیه (۱۵ دقیقه)
+        elapsed_in_candle = (now_ts - candle_time) % candle_duration
+        remaining_seconds = candle_duration - elapsed_in_candle
+        
+        # اگر بیش از ۳ دقیقه (۱۸۰ ثانیه) به پایان کندل مانده باشد، منتظر می‌مانیم
+        if remaining_seconds > 180:
+            return "HOLD", "انتظار برای ۳ دقیقه پایانی کندل"
+    # ---------------------------------------------------------------------------------
+
     closes = np.array([c["close"] for c in candles])
     highs = np.array([c["high"] for c in candles])
     lows = np.array([c["low"] for c in candles])
@@ -305,7 +319,7 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    send_telegram_message("🤖 <b>ربات با ضد رنج پیشرفته، روند EMA و حجم ۲ برابری فعال شد!</b> 🚀")
+    send_telegram_message("🤖 <b>ربات با فیلتر زمانی دقایق پایانی و روند EMA فعال شد!</b> 🚀")
 
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
