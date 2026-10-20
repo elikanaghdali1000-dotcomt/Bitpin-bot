@@ -6,7 +6,7 @@ import threading
 import numpy as np
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# --- تنظیمات تلگرام (ثابت‌شده) ---
+# --- تنظیمات تلگرام ---
 TELEGRAM_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"
 CHAT_ID = "6643451227"
 
@@ -91,16 +91,16 @@ def keep_alive_ping():
 
 def normalize_ts(ts_value):
     try:
-        ts_value = int(ts_value)
-        if ts_value > 10**12:
-            return ts_value / 1000
-        return ts_value
+        ts_val = int(ts_value)
+        if ts_val > 10**12:
+            return ts_val / 1000
+        return ts_val
     except:
         return 0
 
 def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
     if len(candles) < 210:
-        return "HOLD", "داده‌های کندل برای EMA 200 کافی نیست"
+        return "HOLD", f"داده‌های کندل کافی نیست ({len(candles)} کندل، نیاز به حداقل 210 برای EMA 200)"
 
     last_candle = candles[-1]
     candle_time = normalize_ts(last_candle.get("time", 0))
@@ -111,6 +111,7 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
         elapsed_in_candle = max(0, now_ts - candle_time)
         remaining_seconds = candle_duration - (elapsed_in_candle % candle_duration)
 
+        # فیلتر فقط ۳ دقیقه پایانی کندل ۱۵ دقیقه‌ای
         if remaining_seconds > 180:
             return "HOLD", f"انتظار برای ۳ دقیقه پایانی کندل | {int(remaining_seconds)}s مانده"
 
@@ -161,7 +162,7 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
     if is_downtrend and has_explosive_volume and (total_range > avg_recent_range):
         return "SHORT", "سیگنال فروش معتبر"
 
-    return "HOLD", "بازار خنثی یا فاقد شرایط"
+    return "HOLD", "بازار خنثی یا فاقد شرایط روند/حجم"
 
 def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, entry_min, entry_max, sl, tp1, tp2):
     emoji = "🟢" if side == "LONG" else "🔴"
@@ -195,7 +196,7 @@ def send_tp1_alert(symbol, market_type, side, current_price, tp1):
 
 def get_candles(symbol, timeframe="15m"):
     now = int(time.time())
-    lookback = 60 * 60 * 24 * 3  # 3 days for enough candles in 15m
+    lookback = 60 * 60 * 24 * 3  # 3 روز داده برای داشتن حداقل 250 کندل در تایم‌فریم 15m
     url = "https://api.bitpin.org/api/v1/mkt/candles/"
     params = {
         "symbol": symbol,
@@ -243,7 +244,7 @@ def get_market_trend():
 def analyze_market(symbol, market_type, candles, market_trend):
     if len(candles) < 30:
         if symbol == "ZEC_USDT":
-            print(f"[DEBUG] {symbol} | کندل کافی نیست: {len(candles)}")
+            print(f"[DEBUG] {symbol} | کندل بسیار کم: {len(candles)}")
         return
 
     current_price = candles[-1]["close"]
@@ -270,6 +271,7 @@ def analyze_market(symbol, market_type, candles, market_trend):
 
     signal_side, reason = check_market_condition_and_signal(candles, VOLUME_MULTIPLIER)
 
+    # دیباگ وضعیت نماد ZEC برای اینکه دقیقاً ببینی در هر اسکن چه تصمیمی گرفته می‌شود
     if symbol == "ZEC_USDT":
         print(f"[DEBUG] {symbol} {market_type} => {signal_side} | {reason}")
 
@@ -339,7 +341,7 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    send_telegram_message("🤖 <b>ربات با فیلتر زمانی دقایق پایانی و روند EMA فعال شد!</b> 🚀")
+    send_telegram_message("🤖 <b>ربات تحلیل‌گر بیت‌پین با فیلتر روند EMA و رصد فعال راه‌اندازی شد!</b> 🚀")
 
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
@@ -368,7 +370,7 @@ if __name__ == "__main__":
     market_trend = "NEUTRAL"
     scan_round = 0
 
-    while type(True) is bool:
+    while True:
         try:
             scan_round += 1
 
@@ -376,34 +378,37 @@ if __name__ == "__main__":
                 last_signals.clear()
                 tp1_notified.clear()
 
+            # بررسی ترند BTC هر 15 دقیقه
             if time.time() - last_trend_check >= 900 or last_trend_check == 0:
                 market_trend = get_market_trend()
                 print(f"[{time.strftime('%H:%M:%S')}] Bitcoin Trend (1H): {market_trend}")
                 last_trend_check = time.time()
 
+            # لاگ ضربان قلب ربات (هر ۵ دقیقه اعلام زنده بودن می‌کند)
             now_ts = time.time()
-            global last_heartbeat_log
             if now_ts - last_heartbeat_log >= 300:
-                print(f"[{time.strftime('%H:%M:%S')}] HEARTBEAT | bot is alive | round={scan_round}")
+                print(f"[{time.strftime('%H:%M:%S')}] HEARTBEAT | ربات فعال است و در حال چرخش در بازار | دور اسکن: #{scan_round}")
                 last_heartbeat_log = now_ts
 
-            print(f"[{time.strftime('%H:%M:%S')}] Scan round #{scan_round} started...")
+            print(f"[{time.strftime('%H:%M:%S')}] شروع دور اسکن بازار #{scan_round}...")
 
+            # اسکن نمادهای اسپات
             for sym in spot_symbols:
                 candles = get_candles(sym)
                 if candles:
                     analyze_market(sym, "SPOT", candles, market_trend)
                 time.sleep(0.2)
 
+            # اسکن نمادهای تعهدی (مارجین)
             for sym in margin_symbols:
                 candles = get_candles(sym)
                 if candles:
                     analyze_market(sym, "MARGIN", candles, market_trend)
                 time.sleep(0.2)
 
-            print(f"[{time.strftime('%H:%M:%S')}] Scan round #{scan_round} finished.")
-
+            print(f"[{time.strftime('%H:%M:%S')}] پایان دور اسکن #{scan_round}. استراحت کوتاه قبل از دور بعدی...")
             time.sleep(15)
+
         except Exception as e:
             print(f"Loop error: {e}")
             time.sleep(10)
