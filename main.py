@@ -3,10 +3,11 @@ import math
 import time
 import requests
 import threading
+import numpy as np
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- تنظیمات تلگرام (ثابت‌شده) ---
-TELEGRAM_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"
+TELEGRAM_TOKEN = "*******"
 CHAT_ID = "6643451227"
 
 # آدرس عمومی رندر برای پینگ Keep-Alive
@@ -16,41 +17,25 @@ APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 SQUEEZE_RATIO = 0.35
 MIN_BANDWIDTH = 0.008   # 🚫 فیلتر ضد رنج: جلوگیری از سیگنال در بازارهای مرده و کم‌نوسان
 
-SL_PERCENT = 0.012    # ۱.۲ درصد حد ضرر
-TP1_PERCENT = 0.010  # ۱.۰ درصد حد سود اول
-TP2_PERCENT = 0.020  # ۲.۰ درصد حد سود دوم
-VOLUME_MULTIPLIER = 2.2  # ضریب حجم سنگین (روی ۲.۴ تنظیم شده)
+SL_PERCENT = 0.012    # حد ضرر
+TP1_PERCENT = 0.010   # حد سود اول
+TP2_PERCENT = 0.020   # حد سود دوم
+VOLUME_MULTIPLIER = 2.0  # ضریب حجم انفجاری (روی ۲ تنظیم شد)
 
 # --- ضد اسپم / ضد تکرار ---
 SIGNAL_COOLDOWN_SEC = 45 * 60   # ۴۵ دقیقه کول‌داون برای هر ارز/جهت
 REPEAT_SAME_PATTERN_BLOCK = True
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json"
 }
 
 session = requests.Session()
 session.headers.update(HEADERS)
 
-# لیست رصد سیگنال‌ها (معامله فعلی STX هم اضافه شده تا از همین حالا مانیتور شود)
-last_signals = {
-    "STX_USDT_SPOT_LONG": {
-        "side": "LONG",
-        "entry_price": 0.3639,
-        "tp1": 0.3639 * (1 + TP1_PERCENT),
-        "tp2": 0.3639 * (1 + TP2_PERCENT),
-        "sl": 0.3639 * (1 - SL_PERCENT),
-        "status": "ACTIVE",
-        "pattern": "Explosive Breakout (Trend Follow)",
-        "price": 0.3639,
-        "ts": time.time(),
-        "candle_time": 0
-    }
-}
-tp1_notified = {
-    "STX_USDT_SPOT_LONG": False
-}
+last_signals = {}
+tp1_notified = {}
 
 def format_price(price):
     if price is None:
@@ -103,57 +88,55 @@ def keep_alive_ping():
             print(f"Keep-Alive ping warning: {e}")
         time.sleep(480)
 
-def calculate_adx_array(highs, lows, closes, period=14):
-    adx_list = [0.0] * len(closes)
-    if len(closes) < period + 1:
-        return adx_list
-    
-    tr_list, plus_dm_list, minus_dm_list = [], [], []
-    for i in range(1, len(closes)):
-        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-        tr_list.append(tr)
-        
-        up_move = highs[i] - highs[i-1]
-        down_move = lows[i-1] - lows[i]
-        
-        plus_dm = up_move if (up_move > down_move and up_move > 0) else 0.0
-        minus_dm = down_move if (down_move > up_move and down_move > 0) else 0.0
-        
-        plus_dm_list.append(plus_dm)
-        minus_dm_list.append(minus_dm)
-        
-    for i in range(period, len(tr_list)):
-        sub_tr = tr_list[i-period:i]
-        atr = sum(sub_tr) / period
-        if atr == 0:
-            continue
-        
-        plus_di = 100 * (sum(plus_dm_list[i-period:i]) / period) / atr
-        minus_di = 100 * (sum(minus_dm_list[i-period:i]) / period) / atr
-        
-        dx_den = plus_di + minus_di
-        dx = 100 * (abs(plus_di - minus_di) / dx_den) if dx_den > 0 else 0
-        if i + 1 < len(adx_list):
-            adx_list[i+1] = dx
+def check_market_condition_and_signal(candles, tight_volume_multiplier=2.0):
+    if len(candles) < 200:
+        return "HOLD", "داده‌های کندل کافی نیست"
 
-    if len(adx_list) > 1 and adx_list[-1] == 0.0:
-        adx_list[-1] = adx_list[-2]
-        
-    return adx_list
+    closes = np.array([c["close"] for c in candles])
+    highs = np.array([c["high"] for c in candles])
+    lows = np.array([c["low"] for c in candles])
+    volumes = np.array([c["volume"] for c in candles])
 
-def validate_trend_and_volume(adx_array, volumes, min_adx=18.0, dynamic_min_adx=14.0):
-    try:
-        current_adx = adx_array[-1]
-        current_volume = volumes[-1]
-        avg_volume = sum(volumes[-6:-1]) / 5.0 if len(volumes) >= 6 else current_volume
-        
-        if current_adx >= min_adx:
-            return True
-        if (current_adx >= dynamic_min_adx) and (current_volume >= (avg_volume * VOLUME_MULTIPLIER)):
-            return True
-        return False
-    except Exception:
-        return False
+    ema_50 = np.mean(closes[-50:])
+    ema_200 = np.mean(closes[-200:])
+
+    current_close = closes[-1]
+    current_high = highs[-1]
+    current_low = lows[-1]
+    current_volume = volumes[-1]
+    avg_volume = np.mean(volumes[-21:-1])
+
+    # بررسی شدوهای خطرناک (دهانه‌گشاد / ریدمال‌های بازار رنج)
+    body_size = abs(current_close - closes[-2])
+    total_range = current_high - current_low
+    upper_shadow = current_high - max(current_close, closes[-2])
+    lower_shadow = min(current_close, closes[-2]) - current_low
+
+    is_wide_mouth_trap = (upper_shadow > body_size * 1.5) or (lower_shadow > body_size * 1.5)
+    if is_wide_mouth_trap:
+        return "HOLD", "سکوت: بازار رنج و پرشدوی خطرناک (تله)"
+
+    # بررسی فشردگی و حجم انفجاری
+    recent_ranges = highs[-6:-1] - lows[-6:-1]
+    avg_recent_range = np.mean(recent_ranges)
+    is_tight_compression = avg_recent_range < (np.mean(highs[-20:] - lows[-20:]) * 0.7)
+    has_explosive_volume = current_volume >= (avg_volume * tight_volume_multiplier)
+
+    if is_tight_compression and not has_explosive_volume:
+        return "HOLD", "در حال تراکم - منتظر حجم انفجاری (۲x)"
+
+    # فیلتر روند EMA
+    is_uptrend = (current_close > ema_50) and (ema_50 > ema_200)
+    is_downtrend = (current_close < ema_50) and (ema_50 < ema_200)
+
+    # تصمیم نهایی
+    if is_uptrend and has_explosive_volume and (total_range > avg_recent_range):
+        return "LONG", "سیگنال خرید معتبر"
+
+    if is_downtrend and has_explosive_volume and (total_range > avg_recent_range):
+        return "SHORT", "سیگنال فروش معتبر"
+
+    return "HOLD", "بازار خنثی یا فاقد شرایط"
 
 def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, entry_min, entry_max, sl, tp1, tp2):
     emoji = "🟢" if side == "LONG" else "🔴"
@@ -180,32 +163,8 @@ def send_tp1_alert(symbol, market_type, side, current_price, tp1):
         f"⚠️ <b>رسیدن به تارگت اول (TP1) و ریسک‌فری! ({symbol})</b>\n"
         f"📌 <b>بازار:</b> {market_label} | <b>جهت:</b> {side_fa}\n"
         f"💵 <b>قیمت فعلی:</b> <code>{format_price(current_price)}</code>\n"
-        f"🎯 <b>تارگت اول (TP1):</b> <code>{format_price(tp1)}</code>\n\n"
-        f"👉 <i>حد ضرر را روی نقطه ورود (Free Risk) قرار دهید و در صورت تمایل نیمی از سود را سیو کنید.</i>"
-    )
-    send_telegram_message(message)
-
-def send_tp2_alert(symbol, market_type, side, current_price, tp2):
-    side_fa = "خرید (لانگ)" if side == "LONG" else "فروش (شورت)"
-    market_label = "اسپات (Spot)" if market_type == "SPOT" else "تعهدی (Margin)"
-    message = (
-        f"🚀 <b>رسیدن به تارگت دوم (TP2) و خروج کامل! ({symbol})</b>\n"
-        f"📌 <b>بازار:</b> {market_label} | <b>جهت:</b> {side_fa}\n"
-        f"💵 <b>قیمت فعلی:</b> <code>{format_price(current_price)}</code>\n"
-        f"🎯 <b>تارگت دوم (TP2):</b> <code>{format_price(tp2)}</code>\n\n"
-        f"✅ <i>سود کامل محقق شد. معامله با موفقیت به پایان رسید! 👏</i>"
-    )
-    send_telegram_message(message)
-
-def send_sl_alert(symbol, market_type, side, current_price, sl):
-    side_fa = "خرید (لانگ)" if side == "LONG" else "فروش (شورت)"
-    market_label = "اسپات (Spot)" if market_type == "SPOT" else "تعهدی (Margin)"
-    message = (
-        f"🛑 <b>تاچ حد ضرر (SL)! ({symbol})</b>\n"
-        f"📌 <b>بازار:</b> {market_label} | <b>جهت:</b> {side_fa}\n"
-        f"💵 <b>قیمت فعلی:</b> <code>{format_price(current_price)}</code>\n"
-        f"🛑 <b>حد ضرر (SL):</b> <code>{format_price(sl)}</code>\n\n"
-        f"⚠️ <i>سیگنال با حد ضرر منقضی شد. سرمایه خود را حفظ کنید.</i>"
+        f"🎯 <b>تارگت TP1:</b> <code>{format_price(tp1)}</code>\n\n"
+        f"👉 <i>حد ضرر را روی نقطه ورود (Free Risk) قرار دهید.</i>"
     )
     send_telegram_message(message)
 
@@ -255,102 +214,32 @@ def analyze_market(symbol, market_type, candles, market_trend):
     if len(candles) < 30:
         return
 
-    closes = [c["close"] for c in candles]
-    highs = [c["high"] for c in candles]
-    lows = [c["low"] for c in candles]
-    volumes = [c["volume"] for c in candles]
+    current_price = candles[-1]["close"]
     last_candle_time = candles[-1]["time"]
-    current_price = closes[-1]
 
     base_key_long = f"{symbol}_{market_type}_LONG"
     base_key_short = f"{symbol}_{market_type}_SHORT"
 
-    # --- 🔍 سیستم دیده‌بان و ترکینگ خودکار TP1, TP2 و SL ---
     for base_key in (base_key_long, base_key_short):
         saved = last_signals.get(base_key)
-        if not saved or saved.get("status") == "CLOSED":
+        if not saved:
             continue
 
         side = saved["side"]
-        tp1 = saved.get("tp1")
-        tp2 = saved.get("tp2")
-        sl = saved.get("sl")
+        tp1 = saved["tp1"]
 
-        if side == "LONG":
-            # بررسی حد ضرر لانگ
-            if sl and current_price <= sl:
-                send_sl_alert(symbol, market_type, "LONG", current_price, sl)
-                saved["status"] = "CLOSED"
-                continue
-
-            # بررسی تارگت اول لانگ (ریسک‌فری)
-            if not tp1_notified.get(base_key, False) and tp1 and current_price >= tp1 * 0.998:
+        if not tp1_notified.get(base_key, False):
+            if side == "LONG" and current_price >= tp1 * 0.998:
                 send_tp1_alert(symbol, market_type, "LONG", current_price, tp1)
                 tp1_notified[base_key] = True
-
-            # بررسی تارگت دوم لانگ (خروج کامل)
-            if tp2 and current_price >= tp2 * 0.998:
-                send_tp2_alert(symbol, market_type, "LONG", current_price, tp2)
-                saved["status"] = "CLOSED"
-                continue
-
-        elif side == "SHORT":
-            # بررسی حد ضرر شورت
-            if sl and current_price >= sl:
-                send_sl_alert(symbol, market_type, "SHORT", current_price, sl)
-                saved["status"] = "CLOSED"
-                continue
-
-            # بررسی تارگت اول شورت (ریسک‌فری)
-            if not tp1_notified.get(base_key, False) and tp1 and current_price <= tp1 * 1.002:
+            elif side == "SHORT" and current_price <= tp1 * 1.002:
                 send_tp1_alert(symbol, market_type, "SHORT", current_price, tp1)
                 tp1_notified[base_key] = True
 
-            # بررسی تارگت دوم شورت (خروج کامل)
-            if tp2 and current_price <= tp2 * 1.002:
-                send_tp2_alert(symbol, market_type, "SHORT", current_price, tp2)
-                saved["status"] = "CLOSED"
-                continue
+    # اعمال تابع بررسی بازار، ضد رنج و فیلتر روند
+    signal_side, reason = check_market_condition_and_signal(candles, VOLUME_MULTIPLIER)
 
-    sma20 = sum(closes[-20:]) / 20.0
-    variance = sum((x - sma20) ** 2 for x in closes[-20:]) / 20.0
-    std_dev = math.sqrt(variance)
-    upper_band = sma20 + (2 * std_dev)
-    lower_band = sma20 - (2 * std_dev)
-
-    # محاسبه پهنای باند بولینگر
-    current_bandwidth = (upper_band - lower_band) / sma20 if sma20 > 0 else 0
-
-    # 🚫 فیلتر ضد رنج
-    if current_bandwidth < MIN_BANDWIDTH:
-        return
-
-    adx_array = calculate_adx_array(highs, lows, closes)
-    trend_volume_valid = validate_trend_and_volume(adx_array, volumes)
-
-    if not trend_volume_valid:
-        return
-
-    bandwidths = []
-    for i in range(15, 0, -1):
-        idx = -i
-        sub_closes = closes[idx - 20 : idx]
-        if len(sub_closes) == 20:
-            m = sum(sub_closes) / 20.0
-            v = sum((x - m) ** 2 for x in sub_closes) / 20.0
-            s = math.sqrt(v)
-            bandwidths.append(((m + 2 * s) - (m - 2 * s)) / m if m > 0 else 0)
-
-    max_recent_bw = max(bandwidths) if bandwidths else current_bandwidth
-    is_squeeze = current_bandwidth <= (max_recent_bw * SQUEEZE_RATIO)
-
-    # --- بررسی الگوریتم لانگ (فقط روند صعودی و شکست مقاومتی هم‌جهت) ---
-    long_pattern = None
-    if current_price > sma20:
-        if is_squeeze and current_price > upper_band * 0.998:
-            long_pattern = "Explosive Breakout (Trend Follow)"
-
-    if long_pattern:
+    if signal_side == "LONG":
         base_key = f"{symbol}_{market_type}_LONG"
         now_ts = time.time()
 
@@ -358,7 +247,7 @@ def analyze_market(symbol, market_type, candles, market_trend):
         if prev:
             if now_ts - prev.get("ts", 0) < SIGNAL_COOLDOWN_SEC:
                 return
-            if REPEAT_SAME_PATTERN_BLOCK and prev.get("pattern") == long_pattern:
+            if REPEAT_SAME_PATTERN_BLOCK and prev.get("pattern") == "Explosive Breakout (Trend Follow)":
                 return
 
         sl = current_price * (1 - SL_PERCENT)
@@ -369,60 +258,45 @@ def analyze_market(symbol, market_type, candles, market_trend):
 
         last_signals[base_key] = {
             "side": "LONG",
-            "entry_price": current_price,
             "tp1": tp1,
-            "tp2": tp2,
-            "sl": sl,
-            "status": "ACTIVE",
-            "pattern": long_pattern,
+            "pattern": "Explosive Breakout (Trend Follow)",
             "price": current_price,
             "ts": now_ts,
             "candle_time": last_candle_time
         }
         tp1_notified[base_key] = False
 
-        send_telegram_signal(symbol, market_type, "LONG", current_price, long_pattern, market_trend, in_low, in_high, sl, tp1, tp2)
+        send_telegram_signal(symbol, market_type, "LONG", current_price, "Explosive Breakout (Trend Follow)", market_trend, in_low, in_high, sl, tp1, tp2)
         return
 
-    # --- بررسی الگوریتم شورت (فقط روند نزولی و شکست حمایتی هم‌جهت) ---
-    if market_type == "MARGIN":
-        short_pattern = None
-        if current_price < sma20:
-            if is_squeeze and current_price < lower_band * 1.002:
-                short_pattern = "Explosive Breakdown (Trend Follow)"
+    elif signal_side == "SHORT" and market_type == "MARGIN":
+        base_key = f"{symbol}_{market_type}_SHORT"
+        now_ts = time.time()
 
-        if short_pattern:
-            base_key = f"{symbol}_{market_type}_SHORT"
-            now_ts = time.time()
+        prev = last_signals.get(base_key)
+        if prev:
+            if now_ts - prev.get("ts", 0) < SIGNAL_COOLDOWN_SEC:
+                return
+            if REPEAT_SAME_PATTERN_BLOCK and prev.get("pattern") == "Explosive Breakdown (Trend Follow)":
+                return
 
-            prev = last_signals.get(base_key)
-            if prev:
-                if now_ts - prev.get("ts", 0) < SIGNAL_COOLDOWN_SEC:
-                    return
-                if REPEAT_SAME_PATTERN_BLOCK and prev.get("pattern") == short_pattern:
-                    return
+        sl = current_price * (1 + SL_PERCENT)
+        tp1 = current_price * (1 - TP1_PERCENT)
+        tp2 = current_price * (1 - TP2_PERCENT)
+        in_low = current_price * 1.001
+        in_high = current_price * 1.003
 
-            sl = current_price * (1 + SL_PERCENT)
-            tp1 = current_price * (1 - TP1_PERCENT)
-            tp2 = current_price * (1 - TP2_PERCENT)
-            in_low = current_price * 1.001
-            in_high = current_price * 1.003
+        last_signals[base_key] = {
+            "side": "SHORT",
+            "tp1": tp1,
+            "pattern": "Explosive Breakdown (Trend Follow)",
+            "price": current_price,
+            "ts": now_ts,
+            "candle_time": last_candle_time
+        }
+        tp1_notified[base_key] = False
 
-            last_signals[base_key] = {
-                "side": "SHORT",
-                "entry_price": current_price,
-                "tp1": tp1,
-                "tp2": tp2,
-                "sl": sl,
-                "status": "ACTIVE",
-                "pattern": short_pattern,
-                "price": current_price,
-                "ts": now_ts,
-                "candle_time": last_candle_time
-            }
-            tp1_notified[base_key] = False
-
-            send_telegram_signal(symbol, market_type, "SHORT", current_price, short_pattern, market_trend, in_low, in_high, sl, tp1, tp2)
+        send_telegram_signal(symbol, market_type, "SHORT", current_price, "Explosive Breakdown (Trend Follow)", market_trend, in_low, in_high, sl, tp1, tp2)
 
 if __name__ == "__main__":
     server_thread = threading.Thread(target=run_server, daemon=True)
@@ -431,7 +305,7 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    send_telegram_message("🤖 <b>ربات دیده‌بان هوشمند (Trend-Following + Auto Tracker) فعال شد!</b> 🚀")
+    send_telegram_message("🤖 <b>ربات با ضد رنج پیشرفته، روند EMA و حجم ۲ برابری فعال شد!</b> 🚀")
 
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
