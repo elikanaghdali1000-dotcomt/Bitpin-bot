@@ -16,25 +16,41 @@ APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 SQUEEZE_RATIO = 0.35
 MIN_BANDWIDTH = 0.008   # 🚫 فیلتر ضد رنج: جلوگیری از سیگنال در بازارهای مرده و کم‌نوسان
 
-SL_PERCENT = 0.012    # ۱.۵ درصد حد ضرر
-TP1_PERCENT = 0.010  # ۲.۲۵ درصد حد سود اول
-TP2_PERCENT = 0.020  # ۳.۷۵ درصد حد سود دوم
-VOLUME_MULTIPLIER = 2.4  # ضریب حجم سنگین (روی ۴ تنظیم شده)
+SL_PERCENT = 0.012    # ۱.۲ درصد حد ضرر
+TP1_PERCENT = 0.010  # ۱.۰ درصد حد سود اول
+TP2_PERCENT = 0.020  # ۲.۰ درصد حد سود دوم
+VOLUME_MULTIPLIER = 2.2  # ضریب حجم سنگین (روی ۲.۴ تنظیم شده)
 
 # --- ضد اسپم / ضد تکرار ---
 SIGNAL_COOLDOWN_SEC = 45 * 60   # ۴۵ دقیقه کول‌داون برای هر ارز/جهت
 REPEAT_SAME_PATTERN_BLOCK = True
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36",
     "Accept": "application/json"
 }
 
 session = requests.Session()
 session.headers.update(HEADERS)
 
-last_signals = {}
-tp1_notified = {}
+# لیست رصد سیگنال‌ها (معامله فعلی STX هم اضافه شده تا از همین حالا مانیتور شود)
+last_signals = {
+    "STX_USDT_SPOT_LONG": {
+        "side": "LONG",
+        "entry_price": 0.3639,
+        "tp1": 0.3639 * (1 + TP1_PERCENT),
+        "tp2": 0.3639 * (1 + TP2_PERCENT),
+        "sl": 0.3639 * (1 - SL_PERCENT),
+        "status": "ACTIVE",
+        "pattern": "Explosive Breakout (Trend Follow)",
+        "price": 0.3639,
+        "ts": time.time(),
+        "candle_time": 0
+    }
+}
+tp1_notified = {
+    "STX_USDT_SPOT_LONG": False
+}
 
 def format_price(price):
     if price is None:
@@ -164,8 +180,32 @@ def send_tp1_alert(symbol, market_type, side, current_price, tp1):
         f"⚠️ <b>رسیدن به تارگت اول (TP1) و ریسک‌فری! ({symbol})</b>\n"
         f"📌 <b>بازار:</b> {market_label} | <b>جهت:</b> {side_fa}\n"
         f"💵 <b>قیمت فعلی:</b> <code>{format_price(current_price)}</code>\n"
-        f"🎯 <b>تارگت TP1:</b> <code>{format_price(tp1)}</code>\n\n"
-        f"👉 <i>حد ضرر را روی نقطه ورود (Free Risk) قرار دهید.</i>"
+        f"🎯 <b>تارگت اول (TP1):</b> <code>{format_price(tp1)}</code>\n\n"
+        f"👉 <i>حد ضرر را روی نقطه ورود (Free Risk) قرار دهید و در صورت تمایل نیمی از سود را سیو کنید.</i>"
+    )
+    send_telegram_message(message)
+
+def send_tp2_alert(symbol, market_type, side, current_price, tp2):
+    side_fa = "خرید (لانگ)" if side == "LONG" else "فروش (شورت)"
+    market_label = "اسپات (Spot)" if market_type == "SPOT" else "تعهدی (Margin)"
+    message = (
+        f"🚀 <b>رسیدن به تارگت دوم (TP2) و خروج کامل! ({symbol})</b>\n"
+        f"📌 <b>بازار:</b> {market_label} | <b>جهت:</b> {side_fa}\n"
+        f"💵 <b>قیمت فعلی:</b> <code>{format_price(current_price)}</code>\n"
+        f"🎯 <b>تارگت دوم (TP2):</b> <code>{format_price(tp2)}</code>\n\n"
+        f"✅ <i>سود کامل محقق شد. معامله با موفقیت به پایان رسید! 👏</i>"
+    )
+    send_telegram_message(message)
+
+def send_sl_alert(symbol, market_type, side, current_price, sl):
+    side_fa = "خرید (لانگ)" if side == "LONG" else "فروش (شورت)"
+    market_label = "اسپات (Spot)" if market_type == "SPOT" else "تعهدی (Margin)"
+    message = (
+        f"🛑 <b>تاچ حد ضرر (SL)! ({symbol})</b>\n"
+        f"📌 <b>بازار:</b> {market_label} | <b>جهت:</b> {side_fa}\n"
+        f"💵 <b>قیمت فعلی:</b> <code>{format_price(current_price)}</code>\n"
+        f"🛑 <b>حد ضرر (SL):</b> <code>{format_price(sl)}</code>\n\n"
+        f"⚠️ <i>سیگنال با حد ضرر منقضی شد. سرمایه خود را حفظ کنید.</i>"
     )
     send_telegram_message(message)
 
@@ -225,21 +265,52 @@ def analyze_market(symbol, market_type, candles, market_trend):
     base_key_long = f"{symbol}_{market_type}_LONG"
     base_key_short = f"{symbol}_{market_type}_SHORT"
 
+    # --- 🔍 سیستم دیده‌بان و ترکینگ خودکار TP1, TP2 و SL ---
     for base_key in (base_key_long, base_key_short):
         saved = last_signals.get(base_key)
-        if not saved:
+        if not saved or saved.get("status") == "CLOSED":
             continue
 
         side = saved["side"]
-        tp1 = saved["tp1"]
+        tp1 = saved.get("tp1")
+        tp2 = saved.get("tp2")
+        sl = saved.get("sl")
 
-        if not tp1_notified.get(base_key, False):
-            if side == "LONG" and current_price >= tp1 * 0.998:
+        if side == "LONG":
+            # بررسی حد ضرر لانگ
+            if sl and current_price <= sl:
+                send_sl_alert(symbol, market_type, "LONG", current_price, sl)
+                saved["status"] = "CLOSED"
+                continue
+
+            # بررسی تارگت اول لانگ (ریسک‌فری)
+            if not tp1_notified.get(base_key, False) and tp1 and current_price >= tp1 * 0.998:
                 send_tp1_alert(symbol, market_type, "LONG", current_price, tp1)
                 tp1_notified[base_key] = True
-            elif side == "SHORT" and current_price <= tp1 * 1.002:
+
+            # بررسی تارگت دوم لانگ (خروج کامل)
+            if tp2 and current_price >= tp2 * 0.998:
+                send_tp2_alert(symbol, market_type, "LONG", current_price, tp2)
+                saved["status"] = "CLOSED"
+                continue
+
+        elif side == "SHORT":
+            # بررسی حد ضرر شورت
+            if sl and current_price >= sl:
+                send_sl_alert(symbol, market_type, "SHORT", current_price, sl)
+                saved["status"] = "CLOSED"
+                continue
+
+            # بررسی تارگت اول شورت (ریسک‌فری)
+            if not tp1_notified.get(base_key, False) and tp1 and current_price <= tp1 * 1.002:
                 send_tp1_alert(symbol, market_type, "SHORT", current_price, tp1)
                 tp1_notified[base_key] = True
+
+            # بررسی تارگت دوم شورت (خروج کامل)
+            if tp2 and current_price <= tp2 * 1.002:
+                send_tp2_alert(symbol, market_type, "SHORT", current_price, tp2)
+                saved["status"] = "CLOSED"
+                continue
 
     sma20 = sum(closes[-20:]) / 20.0
     variance = sum((x - sma20) ** 2 for x in closes[-20:]) / 20.0
@@ -298,7 +369,11 @@ def analyze_market(symbol, market_type, candles, market_trend):
 
         last_signals[base_key] = {
             "side": "LONG",
+            "entry_price": current_price,
             "tp1": tp1,
+            "tp2": tp2,
+            "sl": sl,
+            "status": "ACTIVE",
             "pattern": long_pattern,
             "price": current_price,
             "ts": now_ts,
@@ -335,7 +410,11 @@ def analyze_market(symbol, market_type, candles, market_trend):
 
             last_signals[base_key] = {
                 "side": "SHORT",
+                "entry_price": current_price,
                 "tp1": tp1,
+                "tp2": tp2,
+                "sl": sl,
+                "status": "ACTIVE",
                 "pattern": short_pattern,
                 "price": current_price,
                 "ts": now_ts,
@@ -352,7 +431,7 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    send_telegram_message("🤖 <b>ربات روی حالت خالصِ موج‌سواری با روند (Trend-Following) تنظیم شد!</b> 🚀")
+    send_telegram_message("🤖 <b>ربات دیده‌بان هوشمند (Trend-Following + Auto Tracker) فعال شد!</b> 🚀")
 
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
