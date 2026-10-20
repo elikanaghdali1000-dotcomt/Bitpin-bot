@@ -285,6 +285,17 @@ def analyze_market(symbol, market_type, candles, market_trend):
 
     signal_side, reason = check_market_condition_and_signal(candles, VOLUME_MULTIPLIER)
 
+    # --- فیلتر سخت‌گیرانه هم‌جهتی کامل با روند بیت‌کوین ---
+    # در روند صعودی بیت‌کوین، شورت کاملاً ممنوع است
+    if market_trend == "BULLISH" and signal_side == "SHORT":
+        return
+    # در روند نزولی بیت‌کوین، لانگ کاملاً ممنوع است
+    if market_trend == "BEARISH" and signal_side == "LONG":
+        return
+    # در بازار خنثی/رنج بیت‌کوین، هیچ سیگنالی صادر نمی‌شود
+    if market_trend == "NEUTRAL":
+        return
+
     if symbol == "ZEC_USDT":
         print(f"[DEBUG] {symbol} {market_type} => {signal_side} | {reason}")
 
