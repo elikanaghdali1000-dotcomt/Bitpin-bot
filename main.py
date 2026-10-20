@@ -98,6 +98,15 @@ def normalize_ts(ts_value):
     except:
         return 0
 
+def calculate_ema(data, window):
+    if len(data) < window:
+        return np.mean(data)
+    alpha = 2 / (window + 1)
+    ema = data[0]
+    for price in data[1:]:
+        ema = (price * alpha) + (ema * (1 - alpha))
+    return ema
+
 def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
     if len(candles) < 210:
         return "HOLD", f"داده‌های کندل کافی نیست ({len(candles)} کندل، نیاز به حداقل 210 برای EMA 200)"
@@ -120,8 +129,9 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
     lows = np.array([c["low"] for c in candles], dtype=float)
     volumes = np.array([c["volume"] for c in candles], dtype=float)
 
-    ema_50 = np.mean(closes[-50:])
-    ema_200 = np.mean(closes[-200:])
+    # محاسبه EMA واقعی
+    ema_50 = calculate_ema(closes, 50)
+    ema_200 = calculate_ema(closes, 200)
 
     current_open_proxy = closes[-2]
     current_close = closes[-1]
@@ -129,6 +139,10 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
     current_low = lows[-1]
     current_volume = volumes[-1]
     avg_volume = np.mean(volumes[-21:-1]) if len(volumes) >= 21 else np.mean(volumes[:-1])
+
+    # فیلتر رنگ کندل برای جلوگیری از خطا (کندل حتماً باید هم‌راستا با جهت معامله بسته شود)
+    is_candle_green = current_close > current_open_proxy
+    is_candle_red = current_close < current_open_proxy
 
     body_size = abs(current_close - current_open_proxy)
     total_range = current_high - current_low
@@ -156,11 +170,13 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
     is_uptrend = (current_close > ema_50) and (ema_50 > ema_200)
     is_downtrend = (current_close < ema_50) and (ema_50 < ema_200)
 
-    if is_uptrend and has_explosive_volume and (total_range > avg_recent_range):
-        return "LONG", "سیگنال خرید معتبر"
+    # سیگنال خرید: روند صعودی + حجم انفجاری + کندل سبز
+    if is_uptrend and has_explosive_volume and is_candle_green and (total_range > avg_recent_range):
+        return "LONG", "سیگنال خرید معتبر (EMA Trend + Green Candle)"
 
-    if is_downtrend and has_explosive_volume and (total_range > avg_recent_range):
-        return "SHORT", "سیگنال فروش معتبر"
+    # سیگنال فروش: روند نزولی + حجم انفجاری + کندل قرمز
+    if is_downtrend and has_explosive_volume and is_candle_red and (total_range > avg_recent_range):
+        return "SHORT", "سیگنال فروش معتبر (EMA Trend + Red Candle)"
 
     return "HOLD", "بازار خنثی یا فاقد شرایط روند/حجم"
 
@@ -196,7 +212,7 @@ def send_tp1_alert(symbol, market_type, side, current_price, tp1):
 
 def get_candles(symbol, timeframe="15m"):
     now = int(time.time())
-    lookback = 60 * 60 * 24 * 3  # 3 روز داده برای داشتن حداقل 250 کندل در تایم‌فریم 15m
+    lookback = 60 * 60 * 24 * 3  # 3 روز داده برای داشتن حداقل 250 کندل
     url = "https://api.bitpin.org/api/v1/mkt/candles/"
     params = {
         "symbol": symbol,
@@ -243,8 +259,6 @@ def get_market_trend():
 
 def analyze_market(symbol, market_type, candles, market_trend):
     if len(candles) < 30:
-        if symbol == "ZEC_USDT":
-            print(f"[DEBUG] {symbol} | کندل بسیار کم: {len(candles)}")
         return
 
     current_price = candles[-1]["close"]
@@ -271,7 +285,6 @@ def analyze_market(symbol, market_type, candles, market_trend):
 
     signal_side, reason = check_market_condition_and_signal(candles, VOLUME_MULTIPLIER)
 
-    # دیباگ وضعیت نماد ZEC برای اینکه دقیقاً ببینی در هر اسکن چه تصمیمی گرفته می‌شود
     if symbol == "ZEC_USDT":
         print(f"[DEBUG] {symbol} {market_type} => {signal_side} | {reason}")
 
@@ -341,7 +354,7 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    send_telegram_message("🤖 <b>ربات تحلیل‌گر بیت‌پین با فیلتر روند EMA و رصد فعال راه‌اندازی شد!</b> 🚀")
+    send_telegram_message("🤖 <b>ربات تحلیل‌گر بیت‌پین با EMA واقعی و فیلتر رنگ کندل راه‌اندازی شد!</b> 🚀")
 
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
@@ -363,7 +376,7 @@ if __name__ == "__main__":
         "AVAX_USDT", "LINK_USDT", "DOT_USDT", "TRX_USDT", "LTC_USDT", "BCH_USDT",
         "NEAR_USDT", "UNI_USDT", "ATOM_USDT", "SUI_USDT", "APT_USDT", "ARB_USDT",
         "OP_USDT", "INJ_USDT", "TIA_USDT", "FTM_USDT", "SEI_USDT", "STX_USDT",
-        "FIL_USDT", "TON_USDT", "PEPE_USDT", "SHIB_USDT", "FET_USDT", "RENDER_USDT"
+        "FIL_USDT", "TON_USDT", "PEPE_USDT", "SHIB_URL" if False else "SHIB_USDT", "FET_USDT", "RENDER_USDT"
     ]
 
     last_trend_check = 0
@@ -384,7 +397,7 @@ if __name__ == "__main__":
                 print(f"[{time.strftime('%H:%M:%S')}] Bitcoin Trend (1H): {market_trend}")
                 last_trend_check = time.time()
 
-            # لاگ ضربان قلب ربات (هر ۵ دقیقه اعلام زنده بودن می‌کند)
+            # لاگ ضربان قلب ربات (هر ۵ دقیقه)
             now_ts = time.time()
             if now_ts - last_heartbeat_log >= 300:
                 print(f"[{time.strftime('%H:%M:%S')}] HEARTBEAT | ربات فعال است و در حال چرخش در بازار | دور اسکن: #{scan_round}")
