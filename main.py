@@ -20,7 +20,7 @@ MIN_BANDWIDTH = 0.008   # 🚫 فیلتر ضد رنج: جلوگیری از سی�
 SL_PERCENT = 0.012    # حد ضرر
 TP1_PERCENT = 0.010   # حد سود اول
 TP2_PERCENT = 0.020   # حد سود دوم
-VOLUME_MULTIPLIER = 2.0  # ضریب حجم انفجاری (روی ۲ تنظیم شد)
+VOLUME_MULTIPLIER = 1.5  # ضریب حجم انفجاری (روی ۲ تنظیم شد)
 
 # --- ضد اسپم / ضد تکرار ---
 SIGNAL_COOLDOWN_SEC = 45 * 60   # ۴۵ دقیقه کول‌داون برای هر ارز/جهت
@@ -89,7 +89,7 @@ def keep_alive_ping():
         time.sleep(480)
 
 def check_market_condition_and_signal(candles, tight_volume_multiplier=2.0):
-    if len(candles) < 200:
+    if len(candles) < 50:
         return "HOLD", "داده‌های کندل کافی نیست"
 
     closes = np.array([c["close"] for c in candles])
@@ -112,7 +112,7 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=2.0):
     upper_shadow = current_high - max(current_close, closes[-2])
     lower_shadow = min(current_close, closes[-2]) - current_low
 
-    is_wide_mouth_trap = (upper_shadow > body_size * 1.5) or (lower_shadow > body_size * 1.5)
+    is_wide_mouth_trap = (upper_shadow > body_size * 2.5) or (lower_shadow > body_size * 2.5)
     if is_wide_mouth_trap:
         return "HOLD", "سکوت: بازار رنج و پرشدوی خطرناک (تله)"
 
