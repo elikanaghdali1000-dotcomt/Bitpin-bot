@@ -15,15 +15,15 @@ APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 # --- تنظیمات استراتژی و ضد رنج هوشمند (فقط روند اصلی) ---
 SQUEEZE_RATIO = 0.35
-MIN_BANDWIDTH = 0.008   # 🚫 فیلتر ضد رنج: جلوگیری از سیگنال در بازارهای مرده و کم‌نوسان
+MIN_BANDWIDTH = 0.008
 
-SL_PERCENT = 0.012    # حد ضرر
-TP1_PERCENT = 0.010   # حد سود اول
-TP2_PERCENT = 0.020   # حد سود دوم
-VOLUME_MULTIPLIER = 1.5  # ضریب حجم انفجاری (روی ۲ تنظیم شد)
+SL_PERCENT = 0.012
+TP1_PERCENT = 0.010
+TP2_PERCENT = 0.020
+VOLUME_MULTIPLIER = 1.5
 
 # --- ضد اسپم / ضد تکرار ---
-SIGNAL_COOLDOWN_SEC = 45 * 60   # ۴۵ دقیقه کول‌داون برای هر ارز/جهت
+SIGNAL_COOLDOWN_SEC = 45 * 60
 REPEAT_SAME_PATTERN_BLOCK = True
 
 HEADERS = {
@@ -36,6 +36,7 @@ session.headers.update(HEADERS)
 
 last_signals = {}
 tp1_notified = {}
+last_heartbeat_log = 0
 
 def format_price(price):
     if price is None:
@@ -88,62 +89,72 @@ def keep_alive_ping():
             print(f"Keep-Alive ping warning: {e}")
         time.sleep(480)
 
-def check_market_condition_and_signal(candles, tight_volume_multiplier=2.0):
-    if len(candles) < 50:
-        return "HOLD", "داده‌های کندل کافی نیست"
+def normalize_ts(ts_value):
+    try:
+        ts_value = int(ts_value)
+        if ts_value > 10**12:
+            return ts_value / 1000
+        return ts_value
+    except:
+        return 0
 
-    # --- فیلتر زمانی جدید: بررسی حجم و سیگنال فقط در ۳ دقیقه پایانی کندل ۱۵ دقیقه‌ای ---
+def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
+    if len(candles) < 210:
+        return "HOLD", "داده‌های کندل برای EMA 200 کافی نیست"
+
     last_candle = candles[-1]
-    candle_time = last_candle.get("time", 0)
+    candle_time = normalize_ts(last_candle.get("time", 0))
+
     if candle_time > 0:
         now_ts = time.time()
-        candle_duration = 15 * 60  # ۹۰۰ ثانیه (۱۵ دقیقه)
-        elapsed_in_candle = (now_ts - candle_time) % candle_duration
-        remaining_seconds = candle_duration - elapsed_in_candle
-        
-        # اگر بیش از ۳ دقیقه (۱۸۰ ثانیه) به پایان کندل مانده باشد، منتظر می‌مانیم
-        if remaining_seconds > 180:
-            return "HOLD", "انتظار برای ۳ دقیقه پایانی کندل"
-    # ---------------------------------------------------------------------------------
+        candle_duration = 15 * 60
+        elapsed_in_candle = max(0, now_ts - candle_time)
+        remaining_seconds = candle_duration - (elapsed_in_candle % candle_duration)
 
-    closes = np.array([c["close"] for c in candles])
-    highs = np.array([c["high"] for c in candles])
-    lows = np.array([c["low"] for c in candles])
-    volumes = np.array([c["volume"] for c in candles])
+        if remaining_seconds > 180:
+            return "HOLD", f"انتظار برای ۳ دقیقه پایانی کندل | {int(remaining_seconds)}s مانده"
+
+    closes = np.array([c["close"] for c in candles], dtype=float)
+    highs = np.array([c["high"] for c in candles], dtype=float)
+    lows = np.array([c["low"] for c in candles], dtype=float)
+    volumes = np.array([c["volume"] for c in candles], dtype=float)
 
     ema_50 = np.mean(closes[-50:])
     ema_200 = np.mean(closes[-200:])
 
+    current_open_proxy = closes[-2]
     current_close = closes[-1]
     current_high = highs[-1]
     current_low = lows[-1]
     current_volume = volumes[-1]
-    avg_volume = np.mean(volumes[-21:-1])
+    avg_volume = np.mean(volumes[-21:-1]) if len(volumes) >= 21 else np.mean(volumes[:-1])
 
-    # بررسی شدوهای خطرناک (دهانه‌گشاد / ریدمال‌های بازار رنج)
-    body_size = abs(current_close - closes[-2])
+    body_size = abs(current_close - current_open_proxy)
     total_range = current_high - current_low
-    upper_shadow = current_high - max(current_close, closes[-2])
-    lower_shadow = min(current_close, closes[-2]) - current_low
+    upper_shadow = current_high - max(current_close, current_open_proxy)
+    lower_shadow = min(current_close, current_open_proxy) - current_low
+
+    if body_size == 0:
+        body_size = 1e-12
 
     is_wide_mouth_trap = (upper_shadow > body_size * 2.5) or (lower_shadow > body_size * 2.5)
     if is_wide_mouth_trap:
-        return "HOLD", "سکوت: بازار رنج و پرشدوی خطرناک (تله)"
+        return "HOLD", "سکوت: بازار رنج و شدوی خطرناک"
 
-    # بررسی فشردگی و حجم انفجاری
     recent_ranges = highs[-6:-1] - lows[-6:-1]
     avg_recent_range = np.mean(recent_ranges)
-    is_tight_compression = avg_recent_range < (np.mean(highs[-20:] - lows[-20:]) * 0.7)
+    range20 = highs[-20:] - lows[-20:]
+    avg_range20 = np.mean(range20)
+
+    is_tight_compression = avg_recent_range < (avg_range20 * 0.7)
     has_explosive_volume = current_volume >= (avg_volume * tight_volume_multiplier)
 
     if is_tight_compression and not has_explosive_volume:
-        return "HOLD", "در حال تراکم - منتظر حجم انفجاری (۲x)"
+        return "HOLD", f"تراکم بدون حجم انفجاری | vol={current_volume:.2f} avg={avg_volume:.2f}"
 
-    # فیلتر روند EMA
     is_uptrend = (current_close > ema_50) and (ema_50 > ema_200)
     is_downtrend = (current_close < ema_50) and (ema_50 < ema_200)
 
-    # تصمیم نهایی
     if is_uptrend and has_explosive_volume and (total_range > avg_recent_range):
         return "LONG", "سیگنال خرید معتبر"
 
@@ -184,10 +195,11 @@ def send_tp1_alert(symbol, market_type, side, current_price, tp1):
 
 def get_candles(symbol, timeframe="15m"):
     now = int(time.time())
+    lookback = 60 * 60 * 24 * 3  # 3 days for enough candles in 15m
     url = "https://api.bitpin.org/api/v1/mkt/candles/"
     params = {
         "symbol": symbol,
-        "from": now - 43200,
+        "from": now - lookback,
         "to": now,
         "res": timeframe
     }
@@ -198,16 +210,20 @@ def get_candles(symbol, timeframe="15m"):
             if isinstance(data, list) and len(data) > 0:
                 candles_list = []
                 for item in data:
+                    ts_val = item.get("ts", item.get("time", 0))
                     candles_list.append({
                         "close": float(item["close"]),
                         "high": float(item["high"]),
                         "low": float(item["low"]),
                         "volume": float(item.get("volume", 0)),
-                        "time": item.get("ts", item.get("time", 0))
+                        "time": normalize_ts(ts_val)
                     })
                 return candles_list
+        else:
+            print(f"[WARN] Candle fetch failed for {symbol} ({timeframe}) status={res.status_code}")
         return []
-    except Exception:
+    except Exception as e:
+        print(f"[ERROR] Candle fetch exception for {symbol} ({timeframe}): {e}")
         return []
 
 def get_market_trend():
@@ -226,6 +242,8 @@ def get_market_trend():
 
 def analyze_market(symbol, market_type, candles, market_trend):
     if len(candles) < 30:
+        if symbol == "ZEC_USDT":
+            print(f"[DEBUG] {symbol} | کندل کافی نیست: {len(candles)}")
         return
 
     current_price = candles[-1]["close"]
@@ -250,8 +268,10 @@ def analyze_market(symbol, market_type, candles, market_trend):
                 send_tp1_alert(symbol, market_type, "SHORT", current_price, tp1)
                 tp1_notified[base_key] = True
 
-    # اعمال تابع بررسی بازار، ضد رنج و فیلتر روند
     signal_side, reason = check_market_condition_and_signal(candles, VOLUME_MULTIPLIER)
+
+    if symbol == "ZEC_USDT":
+        print(f"[DEBUG] {symbol} {market_type} => {signal_side} | {reason}")
 
     if signal_side == "LONG":
         base_key = f"{symbol}_{market_type}_LONG"
@@ -333,7 +353,7 @@ if __name__ == "__main__":
         "GALA_USDT", "CHZ_USDT", "AXS_USDT", "ENJ_USDT", "GMT_USDT", "BTC_IRT",
         "ETH_IRT", "SOL_IRT", "XRP_IRT", "DOGE_IRT", "ADA_IRT", "AVAX_IRT",
         "PEPE_IRT", "SHIB_IRT", "TON_IRT", "FLOKI_IRT", "TRX_IRT", "LINK_IRT",
-        "DOT_IRT", "NEAR_IRT", "SUI_IRT"
+        "DOT_IRT", "NEAR_IRT", "SUI_IRT", "ZEC_USDT"
     ]
     
     margin_symbols = [
@@ -346,9 +366,12 @@ if __name__ == "__main__":
 
     last_trend_check = 0
     market_trend = "NEUTRAL"
+    scan_round = 0
 
     while type(True) is bool:
         try:
+            scan_round += 1
+
             if len(last_signals) > 200:
                 last_signals.clear()
                 tp1_notified.clear()
@@ -357,6 +380,14 @@ if __name__ == "__main__":
                 market_trend = get_market_trend()
                 print(f"[{time.strftime('%H:%M:%S')}] Bitcoin Trend (1H): {market_trend}")
                 last_trend_check = time.time()
+
+            now_ts = time.time()
+            global last_heartbeat_log
+            if now_ts - last_heartbeat_log >= 300:
+                print(f"[{time.strftime('%H:%M:%S')}] HEARTBEAT | bot is alive | round={scan_round}")
+                last_heartbeat_log = now_ts
+
+            print(f"[{time.strftime('%H:%M:%S')}] Scan round #{scan_round} started...")
 
             for sym in spot_symbols:
                 candles = get_candles(sym)
@@ -369,6 +400,8 @@ if __name__ == "__main__":
                 if candles:
                     analyze_market(sym, "MARGIN", candles, market_trend)
                 time.sleep(0.2)
+
+            print(f"[{time.strftime('%H:%M:%S')}] Scan round #{scan_round} finished.")
 
             time.sleep(15)
         except Exception as e:
