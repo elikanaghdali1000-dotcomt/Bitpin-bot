@@ -7,7 +7,7 @@ import numpy as np
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- تنظیمات تلگرام (ثابت‌شده) ---
-TELEGRAM_TOKEN = "*******"
+TELEGRAM_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"
 CHAT_ID = "6643451227"
 
 # آدرس عمومی رندر برای پینگ Keep-Alive
