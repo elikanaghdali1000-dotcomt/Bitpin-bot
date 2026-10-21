@@ -7,8 +7,8 @@ import numpy as np
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- تنظیمات Pushover ---
-POW_USER_KEY = "found"  # کاربر گرامی، یوزر کی خود را اینجا قرار دهید
-POW_API_TOKEN = "located."  # توکن اپلیکیشنی که در سایت ساخته‌اید را اینجا قرار دهید
+POW_USER_KEY = "u25bp9dncidswv1r6473av384coy9s"  # کاربر گرامی، یوزر کی خود را اینجا قرار دهید
+POW_API_TOKEN = "yakk3eus1u@pomail.net."  # توکن اپلیکیشنی که در سایت ساخته‌اید را اینجا قرار دهید
 
 # آدرس عمومی رندر برای پینگ Keep-Alive
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
