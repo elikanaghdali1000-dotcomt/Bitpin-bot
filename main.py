@@ -107,9 +107,55 @@ def calculate_ema(data, window):
         ema = (price * alpha) + (ema * (1 - alpha))
     return ema
 
+def check_healthy_pullback(candles, breakout_level, side):
+    """
+    بررسی هوشمند پولبک سالم برای جلوگیری از تله و خرید در نوک سقف/کف
+    """
+    if len(candles) < 3:
+        return False
+
+    current_candle = candles[-1]
+    prev_candle = candles[-2]
+    volumes = np.array([c["volume"] for c in candles], dtype=float)
+    avg_volume = np.mean(volumes[-21:-1]) if len(volumes) >= 21 else np.mean(volumes[:-1])
+
+    if side == "LONG":
+        # ۱. قیمت نباید زیر سطح شکست (باند بالا) تثبیت شود
+        closed_above_level = current_candle['close'] >= breakout_level
+        # ۲. حجم پولبک باید نسبت به کندل شکست یا میانگین خشک شده باشد
+        low_volume_pullback = current_candle['volume'] < prev_candle['volume'] * 0.85
+        # ۳. قیمت تا سطح آمده و شدوی صعودی زده است
+        touched_support = current_candle['low'] <= breakout_level * 1.004
+        rejection = current_candle['close'] > current_candle['low']
+        # ۴. اصلاح بیش از حد عمیق نباشد (حداکثر ۵۰٪ بدنه کندل جهشی)
+        breakout_body = prev_candle['close'] - prev_candle['open']
+        max_drop = prev_candle['close'] - (breakout_body * 0.5)
+        not_too_deep = current_candle['close'] >= max_drop
+
+        if closed_above_level and low_volume_pullback and touched_support and rejection and not_too_deep:
+            return True
+
+    elif side == "SHORT":
+        # ۱. قیمت نباید بالای سطح شکست (باند پایین) تثبیت شود
+        closed_below_level = current_candle['close'] <= breakout_level
+        # ۲. حجم پولبک کم باشد
+        low_volume_pullback = current_candle['volume'] < prev_candle['volume'] * 0.85
+        # ۳. قیمت تا سطح آمده و شدوی نزولی (پس‌زدن) زده است
+        touched_resistance = current_candle['high'] >= breakout_level * 0.996
+        rejection = current_candle['close'] < current_candle['high']
+        # ۴. اصلاح عمیق نباشد
+        breakout_body = abs(prev_candle['close'] - prev_candle['open'])
+        max_rise = prev_candle['close'] + (breakout_body * 0.5)
+        not_too_deep = current_candle['close'] <= max_rise
+
+        if closed_below_level and low_volume_pullback and touched_resistance and rejection and not_too_deep:
+            return True
+
+    return False
+
 def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
     if len(candles) < 210:
-        return "HOLD", f"داده‌های کندل کافی نیست ({len(candles)} کندل، نیاز به حداقل 210 برای EMA 200)"
+        return "HOLD", 0, f"داده‌های کندل کافی نیست ({len(candles)} کندل)"
 
     last_candle = candles[-1]
     candle_time = normalize_ts(last_candle.get("time", 0))
@@ -122,18 +168,17 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
 
         # فیلتر فقط ۳ دقیقه پایانی کندل ۱۵ دقیقه‌ای
         if remaining_seconds > 180:
-            return "HOLD", f"انتظار برای ۳ دقیقه پایانی کندل | {int(remaining_seconds)}s مانده"
+            return "HOLD", 0, f"انتظار برای ۳ دقیقه پایانی کندل | {int(remaining_seconds)}s مانده"
 
     closes = np.array([c["close"] for c in candles], dtype=float)
     highs = np.array([c["high"] for c in candles], dtype=float)
     lows = np.array([c["low"] for c in candles], dtype=float)
     volumes = np.array([c["volume"] for c in candles], dtype=float)
 
-    # محاسبه EMA واقعی
     ema_50 = calculate_ema(closes, 50)
     ema_200 = calculate_ema(closes, 200)
 
-    # --- محاسبه بولینگر باند (پریود 20، انحراف معیار 2) ---
+    # --- محاسبه بولینگر باند ---
     sma_20 = np.mean(closes[-20:])
     std_20 = np.std(closes[-20:])
     upper_band = sma_20 + (2.0 * std_20)
@@ -146,7 +191,6 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
     current_volume = volumes[-1]
     avg_volume = np.mean(volumes[-21:-1]) if len(volumes) >= 21 else np.mean(volumes[:-1])
 
-    # فیلتر رنگ کندل برای جلوگیری از خطا (کندل حتماً باید هم‌راستا با جهت معامله بسته شود)
     is_candle_green = current_close > current_open_proxy
     is_candle_red = current_close < current_open_proxy
 
@@ -160,7 +204,7 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
 
     is_wide_mouth_trap = (upper_shadow > body_size * 2.5) or (lower_shadow > body_size * 2.5)
     if is_wide_mouth_trap:
-        return "HOLD", "سکوت: بازار رنج و شدوی خطرناک"
+        return "HOLD", 0, "سکوت: بازار رنج و شدوی خطرناک"
 
     recent_ranges = highs[-6:-1] - lows[-6:-1]
     avg_recent_range = np.mean(recent_ranges)
@@ -171,24 +215,25 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
     has_explosive_volume = current_volume >= (avg_volume * tight_volume_multiplier)
 
     if is_tight_compression and not has_explosive_volume:
-        return "HOLD", f"تراکم بدون حجم انفجاری | vol={current_volume:.2f} avg={avg_volume:.2f}"
+        return "HOLD", 0, f"تراکم بدون حجم انفجاری"
 
     is_uptrend = (current_close > ema_50) and (ema_50 > ema_200)
     is_downtrend = (current_close < ema_50) and (ema_50 < ema_200)
 
-    # شکست واقعی باند بالا و پایین
     is_band_breakout_up = current_close > upper_band
     is_band_breakdown_down = current_close < lower_band
 
-    # سیگنال خرید: روند صعودی + حجم انفجاری + کندل سبز + شکست قطعی باند بالا
+    # سیگنال خرید (بررسی پولبک سالم روی باند بالا)
     if is_uptrend and has_explosive_volume and is_candle_green and (total_range > avg_recent_range) and is_band_breakout_up:
-        return "LONG", "سیگنال خرید معتبر (EMA Trend + Breakout Upper Band)"
+        if check_healthy_pullback(candles, upper_band, "LONG"):
+            return "LONG", upper_band, "سیگنال خرید پولبک تاییدشده (Pullback on Upper Band)"
 
-    # سیگنال فروش: روند نزولی + حجم انفجاری + کندل قرمز + شکست قطعی باند پایین
+    # سیگنال فروش (بررسی پولبک سالم روی باند پایین)
     if is_downtrend and has_explosive_volume and is_candle_red and (total_range > avg_recent_range) and is_band_breakdown_down:
-        return "SHORT", "سیگنال فروش معتبر (EMA Trend + Breakdown Lower Band)"
+        if check_healthy_pullback(candles, lower_band, "SHORT"):
+            return "SHORT", lower_band, "سیگنال فروش پولبک تاییدشده (Pullback on Lower Band)"
 
-    return "HOLD", "بازار خنثی یا فاقد شرایط شکست/روند/حجم"
+    return "HOLD", 0, "بازار خنثی یا عدم تایید پولبک"
 
 def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, entry_min, entry_max, sl, tp1, tp2):
     emoji = "🟢" if side == "LONG" else "🔴"
@@ -200,7 +245,7 @@ def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, e
         f"📌 <b>نوع بازار:</b> {market_label}\n"
         f"💵 <b>قیمت فعلی:</b> <code>{format_price(price)}</code>\n"
         f"📊 <b>الگو (روند اصلی):</b> {pattern}\n\n"
-        f"🎯 <b>محدوده ورود:</b> <code>{format_price(entry_min)}</code> - <code>{format_price(entry_max)}</code>\n"
+        f"🎯 <b>محدوده ورود (پولبک):</b> <code>{format_price(entry_min)}</code> - <code>{format_price(entry_max)}</code>\n"
         f"📉 <b>حد سود اول (TP1):</b> <code>{format_price(tp1)}</code>\n"
         f"🚀 <b>حد سود دوم (TP2):</b> <code>{format_price(tp2)}</code>\n"
         f"🛑 <b>حد ضرر (SL):</b> <code>{format_price(sl)}</code>\n"
@@ -222,7 +267,7 @@ def send_tp1_alert(symbol, market_type, side, current_price, tp1):
 
 def get_candles(symbol, timeframe="15m"):
     now = int(time.time())
-    lookback = 60 * 60 * 24 * 3  # 3 روز داده برای داشتن حداقل 250 کندل
+    lookback = 60 * 60 * 24 * 3
     url = "https://api.bitpin.org/api/v1/mkt/candles/"
     params = {
         "symbol": symbol,
@@ -246,11 +291,9 @@ def get_candles(symbol, timeframe="15m"):
                         "time": normalize_ts(ts_val)
                     })
                 return candles_list
-        else:
-            print(f"[WARN] Candle fetch failed for {symbol} ({timeframe}) status={res.status_code}")
         return []
     except Exception as e:
-        print(f"[ERROR] Candle fetch exception for {symbol} ({timeframe}): {e}")
+        print(f"[ERROR] Candle fetch exception for {symbol}: {e}")
         return []
 
 def get_market_trend():
@@ -293,21 +336,14 @@ def analyze_market(symbol, market_type, candles, market_trend):
                 send_tp1_alert(symbol, market_type, "SHORT", current_price, tp1)
                 tp1_notified[base_key] = True
 
-    signal_side, reason = check_market_condition_and_signal(candles, VOLUME_MULTIPLIER)
+    signal_side, breakout_level, reason = check_market_condition_and_signal(candles, VOLUME_MULTIPLIER)
 
-    # --- فیلتر سخت‌گیرانه هم‌جهتی کامل با روند بیت‌کوین ---
-    # در روند صعودی بیت‌کوین، شورت کاملاً ممنوع است
     if market_trend == "BULLISH" and signal_side == "SHORT":
         return
-    # در روند نزولی بیت‌کوین، لانگ کاملاً ممنوع است
     if market_trend == "BEARISH" and signal_side == "LONG":
         return
-    # در بازار خنثی/رنج بیت‌کوین، هیچ سیگنالی صادر نمی‌شود
     if market_trend == "NEUTRAL":
         return
-
-    if symbol == "ZEC_USDT":
-        print(f"[DEBUG] {symbol} {market_type} => {signal_side} | {reason}")
 
     if signal_side == "LONG":
         base_key = f"{symbol}_{market_type}_LONG"
@@ -317,26 +353,27 @@ def analyze_market(symbol, market_type, candles, market_trend):
         if prev:
             if now_ts - prev.get("ts", 0) < SIGNAL_COOLDOWN_SEC:
                 return
-            if REPEAT_SAME_PATTERN_BLOCK and prev.get("pattern") == "Explosive Breakout (Trend Follow)":
+            if REPEAT_SAME_PATTERN_BLOCK and prev.get("pattern") == "Pullback Breakout (Long)":
                 return
 
-        sl = current_price * (1 - SL_PERCENT)
+        sl = breakout_level * (1 - SL_PERCENT)
         tp1 = current_price * (1 + TP1_PERCENT)
         tp2 = current_price * (1 + TP2_PERCENT)
-        in_low = current_price * 0.997
-        in_high = current_price * 0.999
+        # قیمت ورود دقیقاً روی محدوده پولبک (سطح باند و کمی پایین‌تر)
+        in_low = breakout_level * 0.998
+        in_high = breakout_level * 1.002
 
         last_signals[base_key] = {
             "side": "LONG",
             "tp1": tp1,
-            "pattern": "Explosive Breakout (Trend Follow)",
+            "pattern": "Pullback Breakout (Long)",
             "price": current_price,
             "ts": now_ts,
             "candle_time": last_candle_time
         }
         tp1_notified[base_key] = False
 
-        send_telegram_signal(symbol, market_type, "LONG", current_price, "Explosive Breakout (Trend Follow)", market_trend, in_low, in_high, sl, tp1, tp2)
+        send_telegram_signal(symbol, market_type, "LONG", current_price, "Pullback Breakout (Long)", market_trend, in_low, in_high, sl, tp1, tp2)
         return
 
     elif signal_side == "SHORT" and market_type == "MARGIN":
@@ -347,26 +384,27 @@ def analyze_market(symbol, market_type, candles, market_trend):
         if prev:
             if now_ts - prev.get("ts", 0) < SIGNAL_COOLDOWN_SEC:
                 return
-            if REPEAT_SAME_PATTERN_BLOCK and prev.get("pattern") == "Explosive Breakdown (Trend Follow)":
+            if REPEAT_SAME_PATTERN_BLOCK and prev.get("pattern") == "Pullback Breakdown (Short)":
                 return
 
-        sl = current_price * (1 + SL_PERCENT)
+        sl = breakout_level * (1 + SL_PERCENT)
         tp1 = current_price * (1 - TP1_PERCENT)
         tp2 = current_price * (1 - TP2_PERCENT)
-        in_low = current_price * 1.001
-        in_high = current_price * 1.003
+        # قیمت ورود دقیقاً روی محدوده پولبک شورت
+        in_low = breakout_level * 0.998
+        in_high = breakout_level * 1.002
 
         last_signals[base_key] = {
             "side": "SHORT",
             "tp1": tp1,
-            "pattern": "Explosive Breakdown (Trend Follow)",
+            "pattern": "Pullback Breakdown (Short)",
             "price": current_price,
             "ts": now_ts,
             "candle_time": last_candle_time
         }
         tp1_notified[base_key] = False
 
-        send_telegram_signal(symbol, market_type, "SHORT", current_price, "Explosive Breakdown (Trend Follow)", market_trend, in_low, in_high, sl, tp1, tp2)
+        send_telegram_signal(symbol, market_type, "SHORT", current_price, "Pullback Breakdown (Short)", market_trend, in_low, in_high, sl, tp1, tp2)
 
 if __name__ == "__main__":
     server_thread = threading.Thread(target=run_server, daemon=True)
@@ -375,7 +413,7 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    send_telegram_message("🤖 <b>ربات تحلیل‌گر بیت‌پین با EMA واقعی و فیلتر شکست باند راه‌اندازی شد!</b> 🚀")
+    send_telegram_message("🤖 <b>ربات تحلیل‌گر بیت‌پین با فیلتر پولبک هوشمند لانگ و شورت راه‌اندازی شد!</b> 🚀")
 
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
@@ -397,7 +435,7 @@ if __name__ == "__main__":
         "AVAX_USDT", "LINK_USDT", "DOT_USDT", "TRX_USDT", "LTC_USDT", "BCH_USDT",
         "NEAR_USDT", "UNI_USDT", "ATOM_USDT", "SUI_USDT", "APT_USDT", "ARB_USDT",
         "OP_USDT", "INJ_USDT", "TIA_USDT", "FTM_USDT", "SEI_USDT", "STX_USDT",
-        "FIL_USDT", "TON_USDT", "PEPE_USDT", "SHIB_URL" if False else "SHIB_USDT", "FET_USDT", "RENDER_USDT"
+        "FIL_USDT", "TON_USDT", "PEPE_USDT", "SHIB_USDT", "FET_USDT", "RENDER_USDT"
     ]
 
     last_trend_check = 0
@@ -412,35 +450,31 @@ if __name__ == "__main__":
                 last_signals.clear()
                 tp1_notified.clear()
 
-            # بررسی ترند BTC هر 15 دقیقه
             if time.time() - last_trend_check >= 900 or last_trend_check == 0:
                 market_trend = get_market_trend()
                 print(f"[{time.strftime('%H:%M:%S')}] Bitcoin Trend (1H): {market_trend}")
                 last_trend_check = time.time()
 
-            # لاگ ضربان قلب ربات (هر ۵ دقیقه)
             now_ts = time.time()
             if now_ts - last_heartbeat_log >= 300:
-                print(f"[{time.strftime('%H:%M:%S')}] HEARTBEAT | ربات فعال است و در حال چرخش در بازار | دور اسکن: #{scan_round}")
+                print(f"[{time.strftime('%H:%M:%S')}] HEARTBEAT | دور اسکن: #{scan_round}")
                 last_heartbeat_log = now_ts
 
             print(f"[{time.strftime('%H:%M:%S')}] شروع دور اسکن بازار #{scan_round}...")
 
-            # اسکن نمادهای اسپات
             for sym in spot_symbols:
                 candles = get_candles(sym)
                 if candles:
                     analyze_market(sym, "SPOT", candles, market_trend)
                 time.sleep(0.2)
 
-            # اسکن نمادهای تعهدی (مارجین)
             for sym in margin_symbols:
                 candles = get_candles(sym)
                 if candles:
                     analyze_market(sym, "MARGIN", candles, market_trend)
                 time.sleep(0.2)
 
-            print(f"[{time.strftime('%H:%M:%S')}] پایان دور اسکن #{scan_round}. استراحت کوتاه قبل از دور بعدی...")
+            print(f"[{time.strftime('%H:%M:%S')}] پایان دور اسکن #{scan_round}...")
             time.sleep(15)
 
         except Exception as e:
