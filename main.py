@@ -133,6 +133,12 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
     ema_50 = calculate_ema(closes, 50)
     ema_200 = calculate_ema(closes, 200)
 
+    # --- محاسبه بولینگر باند (پریود 20، انحراف معیار 2) ---
+    sma_20 = np.mean(closes[-20:])
+    std_20 = np.std(closes[-20:])
+    upper_band = sma_20 + (2.0 * std_20)
+    lower_band = sma_20 - (2.0 * std_20)
+
     current_open_proxy = closes[-2]
     current_close = closes[-1]
     current_high = highs[-1]
@@ -170,15 +176,19 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.5):
     is_uptrend = (current_close > ema_50) and (ema_50 > ema_200)
     is_downtrend = (current_close < ema_50) and (ema_50 < ema_200)
 
-    # سیگنال خرید: روند صعودی + حجم انفجاری + کندل سبز
-    if is_uptrend and has_explosive_volume and is_candle_green and (total_range > avg_recent_range):
-        return "LONG", "سیگنال خرید معتبر (EMA Trend + Green Candle)"
+    # شکست واقعی باند بالا و پایین
+    is_band_breakout_up = current_close > upper_band
+    is_band_breakdown_down = current_close < lower_band
 
-    # سیگنال فروش: روند نزولی + حجم انفجاری + کندل قرمز
-    if is_downtrend and has_explosive_volume and is_candle_red and (total_range > avg_recent_range):
-        return "SHORT", "سیگنال فروش معتبر (EMA Trend + Red Candle)"
+    # سیگنال خرید: روند صعودی + حجم انفجاری + کندل سبز + شکست قطعی باند بالا
+    if is_uptrend and has_explosive_volume and is_candle_green and (total_range > avg_recent_range) and is_band_breakout_up:
+        return "LONG", "سیگنال خرید معتبر (EMA Trend + Breakout Upper Band)"
 
-    return "HOLD", "بازار خنثی یا فاقد شرایط روند/حجم"
+    # سیگنال فروش: روند نزولی + حجم انفجاری + کندل قرمز + شکست قطعی باند پایین
+    if is_downtrend and has_explosive_volume and is_candle_red and (total_range > avg_recent_range) and is_band_breakdown_down:
+        return "SHORT", "سیگنال فروش معتبر (EMA Trend + Breakdown Lower Band)"
+
+    return "HOLD", "بازار خنثی یا فاقد شرایط شکست/روند/حجم"
 
 def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, entry_min, entry_max, sl, tp1, tp2):
     emoji = "🟢" if side == "LONG" else "🔴"
@@ -365,7 +375,7 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    send_telegram_message("🤖 <b>ربات تحلیل‌گر بیت‌پین با EMA واقعی و فیلتر رنگ کندل راه‌اندازی شد!</b> 🚀")
+    send_telegram_message("🤖 <b>ربات تحلیل‌گر بیت‌پین با EMA واقعی و فیلتر شکست باند راه‌اندازی شد!</b> 🚀")
 
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
