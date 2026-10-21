@@ -20,7 +20,7 @@ MIN_BANDWIDTH = 0.008
 SL_PERCENT = 0.012
 TP1_PERCENT = 0.010
 TP2_PERCENT = 0.020
-VOLUME_MULTIPLIER = 1.4
+VOLUME_MULTIPLIER = 1.3
 
 # --- ضد اسپم / ضد تکرار ---
 SIGNAL_COOLDOWN_SEC = 45 * 60
@@ -136,7 +136,7 @@ def check_healthy_pullback(candles, breakout_level, side):
 
     elif side == "SHORT":
         closed_below_level = current_candle['close'] <= breakout_level
-        low_volume_pullback = current_candle['volume'] < prev_candle['volume'] * 0.85
+        low_volume_pullback = current_candle['volume'] < prev_candle['volume'] * 0.9
         touched_resistance = current_candle['high'] >= breakout_level * 0.996
         rejection = current_candle['close'] < current_candle['high']
         breakout_body = abs(prev_candle['close'] - prev_candle['open'])
