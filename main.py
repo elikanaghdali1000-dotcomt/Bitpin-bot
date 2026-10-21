@@ -6,9 +6,9 @@ import threading
 import numpy as np
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# --- تنظیمات Pushover ---
-POW_USER_KEY = "u25bp9dncidswv1r6473av384coy9s"  # کاربر گرامی، یوزر کی خود را اینجا قرار دهید
-POW_API_TOKEN = "yakk3eus1u@pomail.net."  # توکن اپلیکیشنی که در سایت ساخته‌اید را اینجا قرار دهید
+# --- تنظیمات تلگرام ---
+TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"  # توکن ربات تلگرام خود را اینجا بگذارید
+TELEGRAM_CHAT_ID = "6643451227"      # چت آیدی (یا آیدی عددی کانال/گروه/خودتان) اینجا قرار گیرد
 
 # آدرس عمومی رندر برای پینگ Keep-Alive
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
@@ -48,30 +48,21 @@ def format_price(price):
     else:
         return f"{price:,.2f}"
 
-def send_pushover_message(text, priority=2):
+def send_telegram_message(text):
     """
-    ارسال پیام از طریق Pushover با پشتیبانی از Critical Alert و صدای بلند
-    priority=2 بالاترین سطح اضطراری است که مدام زنگ می‌زند تا حتماً متوجه شوید.
+    ارسال پیام از طریق ربات تلگرام
     """
     try:
-        url = "https://api.pushover.net/1/messages.json"
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
-            "token": POW_API_TOKEN,
-            "user": POW_USER_KEY,
-            "message": text,
-            "html": 1,
-            "priority": priority,
-            "sound": "cosmic"  # صدای آلارم بلند
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": text,
+            "parse_mode": "HTML"
         }
-        # برای سطح اضطراری (priority=2)، پارامترهای تکرار آلارم اجباری هستند
-        if priority == 2:
-            payload["retry"] = 30  # هر ۳۰ ثانیه تکرار شود تا وقتی اکسپت کنید
-            payload["expire"] = 3600  # تا یک ساعت ادامه پیدا کند
-
         res = session.post(url, data=payload, timeout=6)
         return res.status_code == 200
     except Exception as e:
-        print(f"Pushover error: {e}")
+        print(f"Telegram error: {e}")
         return False
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -251,7 +242,7 @@ def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, e
         f"🛑 حد ضرر (SL): {format_price(sl)}\n"
         f"⚡️ روند بیت‌کوین: {btc_trend}"
     )
-    send_pushover_message(message, priority=2)
+    send_telegram_message(message)
 
 def send_tp1_alert(symbol, market_type, side, current_price, tp1):
     side_fa = "خرید (لانگ)" if side == "LONG" else "فروش (شورت)"
@@ -263,7 +254,7 @@ def send_tp1_alert(symbol, market_type, side, current_price, tp1):
         f"🎯 تارگت TP1: {format_price(tp1)}\n\n"
         f"👉 حد ضرر را روی نقطه ورود (Free Risk) قرار دهید."
     )
-    send_pushover_message(message, priority=1)
+    send_telegram_message(message)
 
 def get_candles(symbol, timeframe="15m"):
     now = int(time.time())
@@ -411,8 +402,8 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    # پیام تست اولیه با آلارم اضطراری بلند (Critical Alert) به محض استارت ربات
-    send_pushover_message("🤖 ربات تحلیل‌گر بیت‌پین با سیستم هشدار صوتی Pushover راه‌اندازی شد و تست اتصال با موفقیت انجام گرفت! 🚀", priority=2)
+    # پیام تست اولیه تلگرام
+    send_telegram_message("🤖 ربات تحلیل‌گر بیت‌پین با سیستم هشدار تلگرامی راه‌اندازی شد و تست اتصال با موفقیت انجام گرفت! 🚀")
 
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
