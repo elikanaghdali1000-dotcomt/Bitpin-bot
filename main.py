@@ -36,6 +36,7 @@ session.headers.update(HEADERS)
 
 last_signals = {}
 tp1_notified = {}
+sl_notified = {}   # اضافه شده برای جلوگیری از ارسال مکرر هشدار ضرر
 last_heartbeat_log = 0
 
 def format_price(price):
@@ -197,12 +198,9 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.3):
     if body_size == 0:
         body_size = 1e-12
 
-    # فیلتر ۱ خودکار: شدوی بالای کندل نباید نشانه خالی‌کردن سنگین باشد (کمتر از ۳۵٪ کل کندل)
     clean_bullish_close = (upper_shadow / total_range) <= 0.35
     clean_bearish_close = (lower_shadow / total_range) <= 0.35
 
-    # فیلتر ۲ خودکار: بررسی مقاومت و حمایت ماژور (سقف و کف ۵۰ کندل اخیر)
-    # اگر دقیقاً زیر سقف ماژور باشیم (کمتر از ۱.۲٪ فاصله)، وارد نمی‌شویم تا گیر مقاومت نیفتیم
     major_resistance_50 = np.max(highs[-51:-1])
     major_support_50 = np.min(lows[-51:-1])
     
@@ -212,7 +210,6 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.3):
     distance_to_sup = (current_close - major_support_50) / current_close
     not_directly_above_support = (current_close <= major_support_50) or (distance_to_sup > 0.012)
 
-    # جلوگیری از کندل‌های دوجی/موج‌سواری با شدوی وحشتناک
     is_wide_mouth_trap = (upper_shadow > body_size * 2.5) or (lower_shadow > body_size * 2.5)
     if is_wide_mouth_trap:
         return "HOLD", 0, "سکوت: بازار رنج و شدوی خطرناک"
@@ -222,7 +219,6 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.3):
 
     has_explosive_volume = (current_volume >= avg_volume * tight_volume_multiplier) or (volumes[-2] >= avg_volume * tight_volume_multiplier)
 
-    # روند صعودی و نزولی با میانگین متحرک‌ها
     is_uptrend = (current_close > ema_50) and (ema_50 > ema_200)
     is_downtrend = (current_close < ema_50) and (ema_50 < ema_200)
 
@@ -230,24 +226,18 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.3):
     prev_upper_band = upper_band
     prev_lower_band = lower_band
 
-    # سیگنال خرید (LONG) با اعمال تمام فیلترهای ضد تله
     if is_uptrend and has_explosive_volume and not_directly_under_resistance:
-        # ۱. بریک‌اوت تمیز بدون شدوی سقف بلند
         if is_candle_green and (current_close > upper_band) and (total_range > avg_recent_range * 0.9) and clean_bullish_close:
             return "LONG", upper_band, "سیگنال بریک‌اوت صعودی معتبر (Momentum Breakout)"
         
-        # ۲. شکست در کندل قبل و پولبک تاییدشده
         if prev_close > prev_upper_band:
             if check_healthy_pullback(candles, upper_band, "LONG"):
                 return "LONG", upper_band, "سیگنال خرید پولبک تاییدشده (Pullback Confirmation)"
 
-    # سیگنال فروش (SHORT) با اعمال تمام فیلترهای ضد تله
     if is_downtrend and has_explosive_volume and not_directly_above_support:
-        # ۱. بریک‌داون نزولی تمیز
         if is_candle_red and (current_close < lower_band) and (total_range > avg_recent_range * 0.9) and clean_bearish_close:
             return "SHORT", lower_band, "سیگنال بریک‌داون نزولی معتبر (Momentum Breakdown)"
 
-        # ۲. شکست در کندل قبل و پولبک
         if prev_close < prev_lower_band:
             if check_healthy_pullback(candles, lower_band, "SHORT"):
                 return "SHORT", lower_band, "سیگنال فروش پولبک تاییدشده (Pullback Confirmation)"
@@ -272,17 +262,59 @@ def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, e
     )
     send_telegram_message(message)
 
-def send_tp1_alert(symbol, market_type, side, current_price, tp1):
-    side_fa = "خرید (لانگ)" if side == "LONG" else "فروش (شورت)"
-    market_label = "اسپات (Spot)" if market_type == "SPOT" else "تعهدی (Margin)"
-    message = (
-        f"⚠️ رسیدن به تارگت اول (TP1) و ریسک‌فری! ({symbol})\n"
-        f"📌 بازار: {market_label} | جهت: {side_fa}\n"
-        f"💵 قیمت فعلی: {format_price(current_price)}\n"
-        f"🎯 تارگت TP1: {format_price(tp1)}\n\n"
-        f"👉 حد ضرر را روی نقطه ورود (Free Risk) قرار دهید."
+def send_tp1_alert(symbol, market_type, side, entry_price, current_price, tp1):
+    side_fa = "لانگ (خرید)" if side == "LONG" else "شورت (فروش)"
+    market_fa = "اسپات" if market_type == "SPOT" else "مارجین"
+    
+    if entry_price and entry_price > 0:
+        if side == "LONG":
+            pnl = ((current_price - entry_price) / entry_price) * 100
+        else:
+            pnl = ((entry_price - current_price) / entry_price) * 100
+        pnl_text = f"+{pnl:.2f}% 🚀"
+    else:
+        pnl_text = "+1.00% 🚀"
+
+    msg = (
+        "🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩\n"
+        "🎯 تارگت اول لمس شد! (TP1)\n"
+        f"💰 سود ثبت‌شده: {pnl_text}\n"
+        "🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩\n\n"
+        f"💎 نماد: #{symbol}\n"
+        f"⚡️ موقعیت: {side_fa} | {market_fa}\n\n"
+        f"▫️ قیمت ورود: {format_price(entry_price)}\n"
+        f"▫️ قیمت لمس: {format_price(current_price)}\n"
+        f"▫️ حد سود ۱: {format_price(tp1)}\n\n"
+        "⚠️ حد ضرر معامله به نقطه ورود منتقل شد (Free-Risk)."
     )
-    send_telegram_message(message)
+    send_telegram_message(msg)
+
+def send_sl_alert(symbol, market_type, side, entry_price, current_price, sl):
+    side_fa = "لانگ (خرید)" if side == "LONG" else "شورت (فروش)"
+    market_fa = "اسپات" if market_type == "SPOT" else "مارجین"
+    
+    if entry_price and entry_price > 0:
+        if side == "LONG":
+            pnl = ((current_price - entry_price) / entry_price) * 100
+        else:
+            pnl = ((entry_price - current_price) / entry_price) * 100
+        pnl_text = f"{pnl:.2f}% ❌"
+    else:
+        pnl_text = f"-{SL_PERCENT*100:.2f}% ❌"
+
+    msg = (
+        "🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥\n"
+        "🛑 حد ضرر فعال شد! (STOP)\n"
+        f"🔻 برآیند معامله: {pnl_text}\n"
+        "🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥\n\n"
+        f"💎 نماد: #{symbol}\n"
+        f"⚡️ موقعیت: {side_fa} | {market_fa}\n\n"
+        f"▫️ قیمت ورود: {format_price(entry_price)}\n"
+        f"▫️ قیمت خروج: {format_price(current_price)}\n"
+        f"▫️ حد ضرر: {format_price(sl)}\n\n"
+        "⛔️ پوزیشن با فعال شدن استاپ بسته شد."
+    )
+    send_telegram_message(msg)
 
 def get_candles(symbol, timeframe="15m"):
     now = int(time.time())
@@ -316,18 +348,13 @@ def get_candles(symbol, timeframe="15m"):
         return []
 
 def get_market_trend():
-    """
-    بررسی همزمان روند ۱ ساعته و مومنتوم ۱۵ دقیقه‌ای بیت‌کوین (فیلتر ۳ خودکار)
-    """
     try:
         candles_1h = get_candles("BTC_USDT", timeframe="1h")
         candles_15m = get_candles("BTC_USDT", timeframe="15m")
         
-        # بررسی ریزش ناگهانی کندل اخیر بیت‌کوین
         if len(candles_15m) >= 2:
             btc_last_close = candles_15m[-1]["close"]
             btc_prev_close = candles_15m[-2]["close"]
-            # اگر بیت‌کوین در همین کندل اخیر بیش از ۰.۸٪ ریخته باشد، شرایط پرخطر است
             if (btc_prev_close - btc_last_close) / btc_prev_close > 0.008:
                 return "BTC_DUMPING"
 
@@ -358,19 +385,41 @@ def analyze_market(symbol, market_type, candles, market_trend):
             continue
 
         side = saved["side"]
+        entry_p = saved.get("entry", current_price)
+        sl_val = saved.get("sl")
         tp1 = saved["tp1"]
 
+        # ۱. اولویت اول: بررسی حد ضرر (Stop Loss)
+        if not sl_notified.get(base_key, False) and sl_val:
+            is_sl_hit = False
+            if side == "LONG" and current_price <= sl_val:
+                is_sl_hit = True
+            elif side == "SHORT" and current_price >= sl_val:
+                is_sl_hit = True
+
+            if is_sl_hit:
+                send_sl_alert(symbol, market_type, side, entry_p, current_price, sl_val)
+                sl_notified[base_key] = True
+                last_signals.pop(base_key, None)
+                tp1_notified.pop(base_key, None)
+                sl_notified.pop(base_key, None)
+                continue
+
+        # ۲. اولویت دوم: بررسی تارگت اول (TP1)
         if not tp1_notified.get(base_key, False):
             if side == "LONG" and current_price >= tp1 * 0.998:
-                send_tp1_alert(symbol, market_type, "LONG", current_price, tp1)
+                send_tp1_alert(symbol, market_type, "LONG", entry_p, current_price, tp1)
                 tp1_notified[base_key] = True
+                # ریسک‌فری: انتقال استاپ‌لاس به نقطه ورود
+                last_signals[base_key]["sl"] = entry_p
             elif side == "SHORT" and current_price <= tp1 * 1.002:
-                send_tp1_alert(symbol, market_type, "SHORT", current_price, tp1)
+                send_tp1_alert(symbol, market_type, "SHORT", entry_p, current_price, tp1)
                 tp1_notified[base_key] = True
+                # ریسک‌فری: انتقال استاپ‌لاس به نقطه ورود
+                last_signals[base_key]["sl"] = entry_p
 
     signal_side, breakout_level, reason = check_market_condition_and_signal(candles, VOLUME_MULTIPLIER)
 
-    # اگر بیت‌کوین در حال ریزش ناگهانی باشد، معامله باز نمی‌شود
     if market_trend == "BTC_DUMPING":
         return
 
@@ -400,6 +449,8 @@ def analyze_market(symbol, market_type, candles, market_trend):
 
         last_signals[base_key] = {
             "side": "LONG",
+            "entry": current_price,
+            "sl": sl,
             "tp1": tp1,
             "pattern": reason,
             "price": current_price,
@@ -407,6 +458,7 @@ def analyze_market(symbol, market_type, candles, market_trend):
             "candle_time": last_candle_time
         }
         tp1_notified[base_key] = False
+        sl_notified[base_key] = False
 
         send_telegram_signal(symbol, market_type, "LONG", current_price, reason, market_trend, in_low, in_high, sl, tp1, tp2)
         return
@@ -430,6 +482,8 @@ def analyze_market(symbol, market_type, candles, market_trend):
 
         last_signals[base_key] = {
             "side": "SHORT",
+            "entry": current_price,
+            "sl": sl,
             "tp1": tp1,
             "pattern": reason,
             "price": current_price,
@@ -437,6 +491,7 @@ def analyze_market(symbol, market_type, candles, market_trend):
             "candle_time": last_candle_time
         }
         tp1_notified[base_key] = False
+        sl_notified[base_key] = False
 
         send_telegram_signal(symbol, market_type, "SHORT", current_price, reason, market_trend, in_low, in_high, sl, tp1, tp2)
 
@@ -447,7 +502,6 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    # پیام تست اولیه تلگرام
     send_telegram_message("🤖 ربات تحلیل‌گر بیت‌پین با سیستم هشدار تلگرامی راه‌اندازی شد و تست اتصال با موفقیت انجام گرفت! 🚀")
 
     spot_symbols = [
@@ -484,6 +538,7 @@ if __name__ == "__main__":
             if len(last_signals) > 200:
                 last_signals.clear()
                 tp1_notified.clear()
+                sl_notified.clear()
 
             if time.time() - last_trend_check >= 900 or last_trend_check == 0:
                 market_trend = get_market_trend()
