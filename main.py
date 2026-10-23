@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j905Q2BGXe3BZFJ3jdw8Ow8myV..."
-TELEGRAM_CHAT_ID = "6643451227"
+TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"  # توکن خود را اینجا قرار دهید
+TELEGRAM_CHAT_ID = "6643451227"    # چت‌آیدی خود را اینجا قرار دهید
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 API_URL = "https://api.bitpin.org/api/v1/mkt/candles/"
@@ -47,6 +47,9 @@ def format_number(val):
         return f"{val:,.2f}"
 
 def send_telegram_message(text):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram Token or Chat ID is missing!")
+        return False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -172,7 +175,6 @@ def manage_open_positions(symbol, market_type, current_price):
                 last_signals[base_key]["sl"] = entry_p
 
 def analyze_and_signal(symbol, market_type):
-    # بررسی زمان: تمرکز روی دقایق پایانی کندل (دقایق ۱۲، ۱۳، ۱۴ یا ۰)
     current_minute = datetime.now(timezone.utc).minute
     if current_minute % 15 not in [12, 13, 14, 0]:
         return
@@ -226,7 +228,6 @@ def analyze_and_signal(symbol, market_type):
     is_bullish = ema50.iloc[i] > ema200.iloc[i]
     is_bearish = ema50.iloc[i] < ema200.iloc[i]
 
-    # ویژگی‌های کندل تایید پولبک (بدنه کوچک و حجم پایین‌تر از میانگین)
     c_body = abs(c_close - c_open)
     c_range = c_high - c_low
     is_small_body = c_body <= c_range * 0.6 if c_range > 0 else True
@@ -292,7 +293,6 @@ if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
     threading.Thread(target=keep_alive_ping, daemon=True).start()
 
-    # 📱 اعلان راه‌اندازی اختصاصی برای موبایل
     startup_msg = (
         "📱 <b>اعلان راه‌اندازی ربات موبایل</b>\n\n"
         "🚀 ربات معامله‌گری بیت‌پین با موفقیت روی سرور آنلاین شد!\n"
