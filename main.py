@@ -292,7 +292,13 @@ if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
     threading.Thread(target=keep_alive_ping, daemon=True).start()
 
-    send_telegram_message("🤖 ربات هوشمند بیت‌پین با فیلتر دقیق دقیقه ۱۲ و کندل تایید پولبک راه‌اندازی شد! 🚀")
+    # 📱 اعلان راه‌اندازی اختصاصی برای موبایل
+    startup_msg = (
+        "📱 <b>اعلان راه‌اندازی ربات موبایل</b>\n\n"
+        "🚀 ربات معامله‌گری بیت‌پین با موفقیت روی سرور آنلاین شد!\n"
+        "⚡️ سیستم فیلتر دقیق دقیقه ۱۲ و کندل تایید پولبک/بریک‌آوت فعال گردید."
+    )
+    send_telegram_message(startup_msg)
 
     spot_watchlist = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "PEPE_USDT", "NEAR_USDT", "SUI_USDT",
