@@ -20,7 +20,7 @@ MIN_BANDWIDTH = 0.008
 SL_PERCENT = 0.012
 TP1_PERCENT = 0.010
 TP2_PERCENT = 0.020
-VOLUME_MULTIPLIER = 1.3
+VOLUME_MULTIPLIER = 1.5
 
 # --- ضد اسپم / ضد تکرار ---
 SIGNAL_COOLDOWN_SEC = 45 * 60
@@ -161,7 +161,7 @@ def check_market_condition_and_signal(candles, tight_volume_multiplier=1.3):
         elapsed_in_candle = max(0, now_ts - candle_time)
         remaining_seconds = candle_duration - (elapsed_in_candle % candle_duration)
 
-        if remaining_seconds > 180:
+        if remaining_seconds > 220:
             return "HOLD", 0, f"انتظار برای ۳ دقیقه پایانی کندل | {int(remaining_seconds)}s مانده"
 
     closes = np.array([c["close"] for c in candles], dtype=float)
