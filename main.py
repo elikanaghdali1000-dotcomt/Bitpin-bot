@@ -19,16 +19,15 @@ SL_PERCENT = 0.012          # حد ضرر: 1.2 درصد
 TP1_PERCENT = 0.015         # حد سود اول: 1.5 درصد
 TP2_PERCENT = 0.030         # حد سود دوم: 3 درصد
 MIN_BANDWIDTH = 0.008       # حداقل پهنای باند برای فیلتر رنج
-VOLUME_MULTIPLIER = 1.4     # ضریب حجم بریک‌آوت
-CHECK_INTERVAL = 30         # بررسی هر 30 ثانیه برای دقت بالا در دقایق پایانی
+VOLUME_MULTIPLIER = 1.35    # ضریب حجم بریک‌آوت استاندارد
+CHECK_INTERVAL = 30         # بررسی هر 30 ثانیه
 
 last_signals = {}           
 tp1_notified = {}
 sl_notified = {}
 last_processed_candle_time = {}
 
-# سیستم کش روند ۱ ساعته برای جلوگیری از خطای Rate Limit بیت‌پین
-trend_cache = {}  # {symbol: (trend, timestamp)}
+trend_cache = {}  # کش روند ۱ ساعته
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -37,7 +36,7 @@ HEADERS = {
 session = requests.Session()
 session.headers.update(HEADERS)
 
-# ================= توابع ارسال پیام و وب‌سرور Keep-Alive =================
+# ================= توابع وب‌سرور و اعلان =================
 
 def format_number(val):
     if val is None:
@@ -88,10 +87,10 @@ def keep_alive_ping():
             pass
         time.sleep(480)
 
-# ================= توابع بازار و تحلیل تکنیکال =================
+# ================= تحلیل تکنیکال و فیلترها =================
 
 def get_market_trend(symbol):
-    """بررسی روند ۱ ساعته با کش ۳۰۰ ثانیه‌ای (۵ دقیقه) برای عدم مسدودی IP"""
+    """روند ۱ ساعته استاندارد و منعطف با کش ۳۰۰ ثانیه‌ای"""
     now = time.time()
     if symbol in trend_cache:
         cached_trend, cached_time = trend_cache[symbol]
@@ -99,7 +98,7 @@ def get_market_trend(symbol):
             return cached_trend
 
     try:
-        url = f"{API_URL}?symbol={symbol}&resolution=60&to={int(now)}&count=30"
+        url = f"{API_URL}?symbol={symbol}&resolution=60&to={int(now)}&count=40"
         response = session.get(url, timeout=10)
         data = response.json()
         if 'result' in data and len(data['result']) > 0:
@@ -108,24 +107,11 @@ def get_market_trend(symbol):
                 df_1h[col] = df_1h[col].astype(float)
             
             closes = df_1h['close']
-            highs = df_1h['high']
-            lows = df_1h['low']
-            
-            ema50 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
-            ema200 = closes.ewm(span=50, adjust=False).mean().iloc[-1]
+            ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
             current_p = closes.iloc[-1]
             
-            recent_high = highs.iloc[-10:].max()
-            recent_low = lows.iloc[-10:].min()
-            
-            near_resistance = (recent_high - current_p) / current_p < 0.003
-            near_support = (current_p - recent_low) / current_p < 0.003
-
-            trend = "NEUTRAL"
-            if ema50 > ema200 and not near_resistance:
-                trend = "BULLISH"
-            elif ema50 < ema200 and not near_support:
-                trend = "BEARISH"
+            # روند ۱ ساعته استاندارد: موقعیت قیمت نسبت به EMA 20
+            trend = "BULLISH" if current_p >= ema20 else "BEARISH"
             
             trend_cache[symbol] = (trend, now)
             return trend
@@ -159,7 +145,7 @@ def manage_open_positions(symbol, market_type, current_price):
         sl_val = saved.get("sl")
         tp1 = saved["tp1"]
 
-        # بررسی حد ضرر (SL)
+        # مدیریت حد ضرر
         if not sl_notified.get(base_key, False) and sl_val:
             if (side == "LONG" and current_price <= sl_val) or (side == "SHORT" and current_price >= sl_val):
                 pnl = ((current_price - entry_p) / entry_p) * 100 if side == "LONG" else ((entry_p - current_price) / entry_p) * 100
@@ -174,7 +160,7 @@ def manage_open_positions(symbol, market_type, current_price):
                 last_signals.pop(base_key, None)
                 continue
 
-        # بررسی تارگت اول (TP1) و ریسک‌فری
+        # مدیریت تارگت اول و ریسک‌فری
         if not tp1_notified.get(base_key, False):
             if (side == "LONG" and current_price >= tp1 * 0.998) or (side == "SHORT" and current_price <= tp1 * 1.002):
                 pnl = ((current_price - entry_p) / entry_p) * 100 if side == "LONG" else ((entry_p - current_price) / entry_p) * 100
@@ -195,15 +181,14 @@ def analyze_and_signal(symbol, market_type):
 
     current_price = df['close'].iloc[-1]
     
-    # مدیریت پوزیشن باز به صورت پیوسته (در تمام دقایق بدون تاخیر)
+    # مدیریت پیوسته پوزیشن‌ها در تمام دقایق
     manage_open_positions(symbol, market_type, current_price)
 
-    # فیلتر دقایق پایانی کندل برای ورود به سیگنال جدید
+    # فیلتر دقایق پایانی کندل برای ورود معتبر
     current_minute = datetime.now(timezone.utc).minute
-    if current_minute % 15 not in [12, 13, 14, 0]:
+    if current_minute % 15 not in [11, 12, 13, 14, 0]:
         return
 
-    # استفاده از تایم‌استمپ آخرین کندل جاری جهت عدم ثبت سیگنال تکراری در همان کندل
     current_candle = df.iloc[-1]
     candle_ts = current_candle['timestamp']
     state_key = f"{symbol}_{market_type}"
@@ -226,7 +211,7 @@ def analyze_and_signal(symbol, market_type):
     ema200 = closes.ewm(span=200, adjust=False).mean()
     avg_volume = volumes.rolling(window=20).mean()
 
-    # بررسی وضعیت کندل لایو در حال بسته شدن (دقایق ۱۲ تا ۱۴)
+    # کندل جاری (i = -1)
     i = -1
     c_close = closes.iloc[i]
     c_open = df['open'].iloc[i]
@@ -243,17 +228,29 @@ def analyze_and_signal(symbol, market_type):
         return
 
     trend_1h = get_market_trend(symbol)
-    is_bullish = ema50.iloc[i] > ema200.iloc[i]
-    is_bearish = ema50.iloc[i] < ema200.iloc[i]
+    is_bullish = c_close >= sma.iloc[i]
+    is_bearish = c_close <= sma.iloc[i]
 
     c_body = abs(c_close - c_open)
     c_range = c_high - c_low
-    is_small_body = c_body <= c_range * 0.6 if c_range > 0 else True
+    is_small_body = c_body <= (c_range * 0.65) if c_range > 0 else True
 
     # سیگنال LONG
     if trend_1h == "BULLISH" and is_bullish:
         is_breakout = (c_close > c_upper) and (c_close > c_open) and (c_vol > c_avg_vol * VOLUME_MULTIPLIER)
-        is_pullback = (c_low <= c_sma * 1.005) and (c_close > c_open) and is_small_body and (c_vol <= c_avg_vol)
+        
+        # بررسی سقف در ۳ کندل گذشته (تا فرآیند واقعی پولبک شکار شود)
+        recent_break = highs.iloc[-4:-1].max() >= upper_band.iloc[-4:-1].min() * 0.998
+        touched_roof = recent_break and (c_low <= c_upper * 1.006 and c_low >= c_sma)
+        touched_sma = (c_low <= c_sma * 1.005)
+        
+        is_pullback = (
+            (touched_roof or touched_sma)
+            and (c_close >= c_sma) 
+            and (c_close >= c_open) 
+            and is_small_body 
+            and (c_vol <= c_avg_vol * 1.15)
+        )
 
         if is_breakout or is_pullback:
             base_key = f"{symbol}_{market_type}_LONG"
@@ -282,7 +279,19 @@ def analyze_and_signal(symbol, market_type):
     # سیگنال SHORT
     if market_type == "MARGIN" and trend_1h == "BEARISH" and is_bearish:
         is_breakout_s = (c_close < c_lower) and (c_close < c_open) and (c_vol > c_avg_vol * VOLUME_MULTIPLIER)
-        is_pullback_s = (c_high >= c_sma * 0.995) and (c_close < c_open) and is_small_body and (c_vol <= c_avg_vol)
+        
+        # بررسی کف در ۳ کندل گذشته
+        recent_break_s = lows.iloc[-4:-1].min() <= lower_band.iloc[-4:-1].max() * 1.002
+        touched_floor = recent_break_s and (c_high >= c_lower * 0.994 and c_high <= c_sma)
+        touched_sma_s = (c_high >= c_sma * 0.995)
+        
+        is_pullback_s = (
+            (touched_floor or touched_sma_s)
+            and (c_close <= c_sma) 
+            and (c_close <= c_open) 
+            and is_small_body 
+            and (c_vol <= c_avg_vol * 1.15)
+        )
 
         if is_breakout_s or is_pullback_s:
             base_key = f"{symbol}_{market_type}_SHORT"
@@ -316,7 +325,7 @@ if __name__ == "__main__":
     startup_msg = (
         "📱 <b>اعلان راه‌اندازی ربات موبایل</b>\n\n"
         "🚀 ربات معامله‌گری بیت‌پین با موفقیت روی سرور آنلاین شد!\n"
-        "⚡️ سیستم فیلتر دقیق دقیقه ۱۲ و کندل تایید پولبک/بریک‌آوت فعال گردید."
+        "⚡️ استراتژی پولبک و بریک‌آوت استاندارد (بالانس‌شده) فعال گردید."
     )
     send_telegram_message(startup_msg)
 
