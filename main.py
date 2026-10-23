@@ -48,7 +48,6 @@ def get_active_symbols():
             tickers = data.get("results", data) if isinstance(data, dict) else data
             symbols = []
             for item in tickers:
-                # فقط بازار پایه تومان یا تتر
                 symbol = item.get("symbol", "")
                 if symbol and (symbol.endswith("_IRT") or symbol.endswith("_USDT")):
                     symbols.append(symbol)
@@ -56,7 +55,6 @@ def get_active_symbols():
             return symbols[:30] # محدود کردن به 30 ارز پرطرفدار برای جلوگیری از بن شدن IP
     except Exception as e:
         print(f"[Bitpin Error] Fetching tickers failed: {e}")
-    # لیست پیش‌فرض در صورت خطا
     return ["BTC_IRT", "ETH_IRT", "SOL_IRT", "DOGE_IRT", "PEPE_IRT"]
 
 # ================= وب‌سرور Keep-Alive برای رندر =================
@@ -91,7 +89,6 @@ def fetch_candles(symbol, resolution="15", limit=100):
             data = response.json()
             if isinstance(data, list) and len(data) > 0:
                 df = pd.DataFrame(data)
-                # ساختار معمول بیت‌پین: [timestamp, open, high, low, close, volume]
                 if len(df.columns) >= 6:
                     df = df.iloc[:, :6]
                     df.columns = ['time', 'open', 'high', 'low', 'close', 'volume']
@@ -112,7 +109,6 @@ def analyze_market():
         if df is None or len(df) < PERIOD + 5:
             continue
             
-        # محاسبات اندیکاتورها
         df['sma'] = df['close'].rolling(window=PERIOD).mean()
         df['std'] = df['close'].rolling(window=PERIOD).std()
         df['upper'] = df['sma'] + (STD_DEV * df['std'])
@@ -120,7 +116,6 @@ def analyze_market():
         df['bandwidth'] = (df['upper'] - df['lower']) / df['sma']
         df['avg_vol'] = df['volume'].rolling(window=PERIOD).mean()
         
-        # بررسی کندل آخر بسته شده (اندیس -2 چون کندل آخر در حال تشکیل است)
         c_open = df['open'].iloc[-2]
         c_high = df['high'].iloc[-2]
         c_low = df['low'].iloc[-2]
@@ -128,9 +123,6 @@ def analyze_market():
         c_vol = df['volume'].iloc[-2]
         c_avg_vol = df['avg_vol'].iloc[-2]
         c_sma = df['sma'].iloc[-2]
-        c_upper = df['upper'].iloc[-2]
-        c_lower = df['lower'].iloc[-2]
-        c_bandwidth = df['bandwidth'].iloc[-2]
         
         c_body = abs(c_close - c_open)
         c_range = c_high - c_low
@@ -141,7 +133,6 @@ def analyze_market():
         
         # شرایط پولبک لانگ
         is_pullback_long = (c_low <= c_sma * 1.005) and (c_close > c_open) and is_small_body and (c_vol <= c_avg_vol)
-        
         if is_pullback_long:
             print(f"[SIGNAL FOUND] Long pullback on {symbol}! Price: {c_close}")
             msg = f"🚀 **سیگنال لانگ (خرید)**\nارز: `{symbol}`\nقیمت ورود: `{c_close}`"
@@ -149,7 +140,6 @@ def analyze_market():
             
         # شرایط پولبک شورت
         is_pullback_short = (c_high >= c_sma * 0.995) and (c_close < c_open) and is_small_body and (c_vol <= c_avg_vol)
-        
         if is_pullback_short:
             print(f"[SIGNAL FOUND] Short pullback on {symbol}! Price: {c_close}")
             msg = f"📉 **سیگنال شورت (فروش تعهدی)**\nارز: `{symbol}`\nقیمت ورود: `{c_close}`"
@@ -166,21 +156,16 @@ def bot_loop():
         now = datetime.now(timezone.utc)
         current_minute = now.minute
         
-        # بررسی در دقایق 12، 13، 14 و 0 (ابتدای کندل جدید 15 دقیقه‌ای)
         if current_minute in [12, 13, 14, 0]:
             try:
                 analyze_market()
             except Exception as e:
                 print(f"[Loop Error] {e}")
-            # خوابیدن برای جلوگیری از اجرای مکرر در یک دقیقه
             time.sleep(60)
         else:
             time.sleep(15)
 
 if __name__ == "__main__":
-    # اجرای وب‌سرور در یک ترد جداگانه
     t_server = threading.Thread(target=run_server, daemon=True)
     t_server.start()
-    
-    # اجرای حلقه اصلی ربات
     bot_loop()
