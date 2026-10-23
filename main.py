@@ -6,14 +6,14 @@ import threading
 import numpy as np
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# --- تنظیمات تلگرام ---
-TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"  # توکن ربات تلگرام خود را اینجا بگذارید
-TELEGRAM_CHAT_ID = "6643451227"      # چت آیدی (یا آیدی عددی کانال/گروه/خودتان) اینجا قرار گیرد
+# --- تنظیمات تلگرام (استفاده از متغیرهای محیطی برای امنیت) ---
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "PUT_TOKEN_HERE")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "PUT_CHAT_ID_HERE")
 
 # آدرس عمومی رندر برای پینگ Keep-Alive
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
-# --- تنظیمات استراتژی و ضد رنج هوشمند (فقط روند اصلی) ---
+# --- تنظیمات استراتژی و ضد رنج هوشمند ---
 SQUEEZE_RATIO = 0.35
 MIN_BANDWIDTH = 0.008
 
@@ -36,23 +36,25 @@ session.headers.update(HEADERS)
 
 last_signals = {}
 tp1_notified = {}
-sl_notified = {}   # اضافه شده برای جلوگیری از ارسال مکرر هشدار ضرر
-last_heartbeat_log = 0
+sl_notified = {}
+last_processed_candle_time = {} # جلوگیری از بررسی تکراری یک کندل بسته
+resistance_cache_1h = {}        # کش مقاومت‌های ۱ ساعته
+last_heartbeat_log = 0          # اصلاح متغیر هرت‌بیت
 
-def format_price(price):
-    if price is None:
+def format_number(val):
+    """
+    فرمت کردن اعداد بدون نماد ارزی، برای قرارگیری داخل تگ code تلگرام جهت کپی آسان
+    """
+    if val is None:
         return "0"
-    if price < 0.0001:
-        return f"{price:.8f}".rstrip('0').rstrip('.')
-    elif price < 1:
-        return f"{price:.4f}".rstrip('0').rstrip('.')
+    if val < 0.0001:
+        return f"{val:.8f}".rstrip('0').rstrip('.')
+    elif val < 1:
+        return f"{val:.4f}".rstrip('0').rstrip('.')
     else:
-        return f"{price:,.2f}"
+        return f"{val:,.2f}"
 
 def send_telegram_message(text):
-    """
-    ارسال پیام از طریق ربات تلگرام
-    """
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {
@@ -115,134 +117,178 @@ def calculate_ema(data, window):
         ema = (price * alpha) + (ema * (1 - alpha))
     return ema
 
+def get_candles(symbol, timeframe="15m"):
+    now = int(time.time())
+    lookback = 60 * 60 * 24 * 3
+    url = "https://api.bitpin.org/api/v1/mkt/candles/"
+    params = {
+        "symbol": symbol,
+        "from": now - lookback,
+        "to": now,
+        "res": timeframe
+    }
+    try:
+        res = session.get(url, params=params, timeout=7)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list) and len(data) > 0:
+                candles_list = []
+                for item in data:
+                    ts_val = item.get("ts", item.get("time", 0))
+                    candles_list.append({
+                        "open": float(item["open"]),
+                        "close": float(item["close"]),
+                        "high": float(item["high"]),
+                        "low": float(item["low"]),
+                        "volume": float(item.get("volume", 0)),
+                        "time": normalize_ts(ts_val)
+                    })
+                return candles_list
+        return []
+    except Exception as e:
+        print(f"[ERROR] Candle fetch exception for {symbol}: {e}")
+        return []
+
+def get_1h_resistance_support(symbol):
+    now = time.time()
+    cache = resistance_cache_1h.get(symbol)
+    if cache and (now - cache["time"] < 600):
+        return cache["res"], cache["sup"]
+
+    candles_1h = get_candles(symbol, timeframe="1h")
+    if len(candles_1h) < 30:
+        return None, None
+
+    highs = np.array([c["high"] for c in candles_1h[:-1]], dtype=float)
+    lows = np.array([c["low"] for c in candles_1h[:-1]], dtype=float)
+
+    major_res = np.max(highs[-60:]) if len(highs) >= 60 else np.max(highs)
+    major_sup = np.min(lows[-60:]) if len(lows) >= 60 else np.min(lows)
+
+    resistance_cache_1h[symbol] = {
+        "res": major_res,
+        "sup": major_sup,
+        "time": now
+    }
+    return major_res, major_sup
+
 def check_healthy_pullback(candles, breakout_level, side):
-    """
-    بررسی هوشمند پولبک کم‌عمق یا ادامه حرکت، بدون محدودیت‌های قفل‌کننده
-    """
     if len(candles) < 3:
         return False
 
+    sig_candle = candles[-2]
     current_candle = candles[-1]
-    prev_candle = candles[-2]
-    prev_open = candles[-3]["close"]
-
+    
     if side == "LONG":
-        breakout_body = max(prev_candle['close'] - prev_open, 1e-12)
-        min_allowed_level = min(breakout_level, prev_candle['close'] - (breakout_body * 0.5))
+        breakout_body = max(sig_candle['close'] - sig_candle['open'], 1e-12)
+        min_allowed_level = min(breakout_level, sig_candle['close'] - (breakout_body * 0.5))
         closed_well = current_candle['close'] >= min_allowed_level
-        
-        not_heavy_dump = current_candle['volume'] <= prev_candle['volume'] * 1.2
+        not_heavy_dump = current_candle['volume'] <= sig_candle['volume'] * 1.2
         held_structure = current_candle['low'] >= (min_allowed_level * 0.995)
-
         return closed_well and not_heavy_dump and held_structure
 
     elif side == "SHORT":
-        breakout_body = max(abs(prev_candle['close'] - prev_open), 1e-12)
-        max_allowed_level = max(breakout_level, prev_candle['close'] + (breakout_body * 0.5))
+        breakout_body = max(abs(sig_candle['close'] - sig_candle['open']), 1e-12)
+        max_allowed_level = max(breakout_level, sig_candle['close'] + (breakout_body * 0.5))
         closed_well = current_candle['close'] <= max_allowed_level
-        
-        not_heavy_pump = current_candle['volume'] <= prev_candle['volume'] * 1.2
+        not_heavy_pump = current_candle['volume'] <= sig_candle['volume'] * 1.2
         held_structure = current_candle['high'] <= (max_allowed_level * 1.005)
-
         return closed_well and not_heavy_pump and held_structure
 
     return False
 
-def check_market_condition_and_signal(candles, tight_volume_multiplier=1.3):
+def check_market_condition_and_signal(symbol, candles, tight_volume_multiplier=1.5):
     if len(candles) < 210:
-        return "HOLD", 0, f"داده‌های کندل کافی نیست ({len(candles)} کندل)"
+        return "HOLD", 0, 0, f"داده‌های کندل کافی نیست ({len(candles)} کندل)"
 
-    last_candle = candles[-1]
-    candle_time = normalize_ts(last_candle.get("time", 0))
+    sig_candle = candles[-2]
+    current_price_for_eval = sig_candle["close"]
 
-    if candle_time > 0:
-        now_ts = time.time()
-        candle_duration = 15 * 60
-        elapsed_in_candle = max(0, now_ts - candle_time)
-        remaining_seconds = candle_duration - (elapsed_in_candle % candle_duration)
-
-        if remaining_seconds > 220:
-            return "HOLD", 0, f"انتظار برای ۳ دقیقه پایانی کندل | {int(remaining_seconds)}s مانده"
-
-    closes = np.array([c["close"] for c in candles], dtype=float)
-    highs = np.array([c["high"] for c in candles], dtype=float)
-    lows = np.array([c["low"] for c in candles], dtype=float)
-    volumes = np.array([c["volume"] for c in candles], dtype=float)
+    closes = np.array([c["close"] for c in candles[:-1]], dtype=float)
+    highs = np.array([c["high"] for c in candles[:-1]], dtype=float)
+    lows = np.array([c["low"] for c in candles[:-1]], dtype=float)
+    volumes = np.array([c["volume"] for c in candles[:-1]], dtype=float)
 
     ema_50 = calculate_ema(closes, 50)
     ema_200 = calculate_ema(closes, 200)
 
-    sma_20 = np.mean(closes[-20:])
-    std_20 = np.std(closes[-20:])
-    upper_band = sma_20 + (2.0 * std_20)
-    lower_band = sma_20 - (2.0 * std_20)
+    sma_20_now = np.mean(closes[-20:])
+    std_20_now = np.std(closes[-20:])
+    upper_band_now = sma_20_now + (2.0 * std_20_now)
+    lower_band_now = sma_20_now - (2.0 * std_20_now)
+    bandwidth_now = (upper_band_now - lower_band_now) / sma_20_now
 
-    current_open_proxy = closes[-2]
-    current_close = closes[-1]
-    current_high = highs[-1]
-    current_low = lows[-1]
-    current_volume = volumes[-1]
+    if bandwidth_now < MIN_BANDWIDTH:
+        return "HOLD", 0, 0, "سکوت: بازار رنج و بولینگر فشرده (Low Bandwidth)"
+
+    sma_20_prev = np.mean(closes[-21:-1])
+    std_20_prev = np.std(closes[-21:-1])
+    upper_band_prev = sma_20_prev + (2.0 * std_20_prev)
+    lower_band_prev = sma_20_prev - (2.0 * std_20_prev)
+
+    sig_open = sig_candle["open"]
+    sig_close = sig_candle["close"]
+    sig_high = sig_candle["high"]
+    sig_low = sig_candle["low"]
+    sig_volume = sig_candle["volume"]
     avg_volume = np.mean(volumes[-21:-1]) if len(volumes) >= 21 else np.mean(volumes[:-1])
 
-    is_candle_green = current_close > current_open_proxy
-    is_candle_red = current_close < current_open_proxy
+    is_candle_green = sig_close > sig_open
+    is_candle_red = sig_close < sig_open
 
-    body_size = abs(current_close - current_open_proxy)
-    total_range = current_high - current_low
+    body_size = abs(sig_close - sig_open)
+    total_range = sig_high - sig_low
     if total_range == 0:
         total_range = 1e-12
 
-    upper_shadow = current_high - max(current_close, current_open_proxy)
-    lower_shadow = min(current_close, current_open_proxy) - current_low
-
-    if body_size == 0:
-        body_size = 1e-12
+    upper_shadow = sig_high - max(sig_close, sig_open)
+    lower_shadow = min(sig_close, sig_open) - sig_low
 
     clean_bullish_close = (upper_shadow / total_range) <= 0.35
     clean_bearish_close = (lower_shadow / total_range) <= 0.35
 
-    major_resistance_50 = np.max(highs[-51:-1])
-    major_support_50 = np.min(lows[-51:-1])
-    
-    distance_to_res = (major_resistance_50 - current_close) / current_close
-    not_directly_under_resistance = (current_close >= major_resistance_50) or (distance_to_res > 0.012)
-
-    distance_to_sup = (current_close - major_support_50) / current_close
-    not_directly_above_support = (current_close <= major_support_50) or (distance_to_sup > 0.012)
-
     is_wide_mouth_trap = (upper_shadow > body_size * 2.5) or (lower_shadow > body_size * 2.5)
     if is_wide_mouth_trap:
-        return "HOLD", 0, "سکوت: بازار رنج و شدوی خطرناک"
+        return "HOLD", 0, 0, "سکوت: شدوی خطرناک و تله رنج"
 
-    recent_ranges = highs[-6:-1] - lows[-6:-1]
+    major_res_1h, major_sup_1h = get_1h_resistance_support(symbol)
+    if major_res_1h and major_sup_1h:
+        dist_to_res = (major_res_1h - sig_close) / sig_close
+        not_directly_under_resistance = (sig_close >= major_res_1h) or (dist_to_res > 0.008)
+
+        dist_to_sup = (sig_close - major_sup_1h) / sig_close
+        not_directly_above_support = (sig_close <= major_sup_1h) or (dist_to_sup > 0.008)
+    else:
+        not_directly_under_resistance = True
+        not_directly_above_support = True
+
+    recent_ranges = highs[-6:] - lows[-6:]
     avg_recent_range = np.mean(recent_ranges)
 
-    has_explosive_volume = (current_volume >= avg_volume * tight_volume_multiplier) or (volumes[-2] >= avg_volume * tight_volume_multiplier)
+    has_explosive_volume = (sig_volume >= avg_volume * tight_volume_multiplier)
 
-    is_uptrend = (current_close > ema_50) and (ema_50 > ema_200)
-    is_downtrend = (current_close < ema_50) and (ema_50 < ema_200)
+    is_uptrend = (sig_close > ema_50) and (ema_50 > ema_200)
+    is_downtrend = (sig_close < ema_50) and (ema_50 < ema_200)
 
     prev_close = closes[-2]
-    prev_upper_band = upper_band
-    prev_lower_band = lower_band
 
     if is_uptrend and has_explosive_volume and not_directly_under_resistance:
-        if is_candle_green and (current_close > upper_band) and (total_range > avg_recent_range * 0.9) and clean_bullish_close:
-            return "LONG", upper_band, "سیگنال بریک‌اوت صعودی معتبر (Momentum Breakout)"
+        if is_candle_green and (sig_close > upper_band_now) and (total_range > avg_recent_range * 0.9) and clean_bullish_close:
+            return "LONG", upper_band_now, current_price_for_eval, "سیگنال بریک‌اوت صعودی معتبر (Momentum Breakout)"
         
-        if prev_close > prev_upper_band:
-            if check_healthy_pullback(candles, upper_band, "LONG"):
-                return "LONG", upper_band, "سیگنال خرید پولبک تاییدشده (Pullback Confirmation)"
+        if prev_close > upper_band_prev:
+            if check_healthy_pullback(candles, upper_band_now, "LONG"):
+                return "LONG", upper_band_now, current_price_for_eval, "سیگنال خرید پولبک تاییدشده (Pullback Confirmation)"
 
     if is_downtrend and has_explosive_volume and not_directly_above_support:
-        if is_candle_red and (current_close < lower_band) and (total_range > avg_recent_range * 0.9) and clean_bearish_close:
-            return "SHORT", lower_band, "سیگنال بریک‌داون نزولی معتبر (Momentum Breakdown)"
+        if is_candle_red and (sig_close < lower_band_now) and (total_range > avg_recent_range * 0.9) and clean_bearish_close:
+            return "SHORT", lower_band_now, current_price_for_eval, "سیگنال بریک‌داون نزولی معتبر (Momentum Breakdown)"
 
-        if prev_close < prev_lower_band:
-            if check_healthy_pullback(candles, lower_band, "SHORT"):
-                return "SHORT", lower_band, "سیگنال فروش پولبک تاییدشده (Pullback Confirmation)"
+        if prev_close < lower_band_prev:
+            if check_healthy_pullback(candles, lower_band_now, "SHORT"):
+                return "SHORT", lower_band_now, current_price_for_eval, "سیگنال فروش پولبک تاییدشده (Pullback Confirmation)"
 
-    return "HOLD", 0, "بازار خنثی یا عدم تایید شرایط ورود"
+    return "HOLD", 0, 0, "بازار خنثی یا عدم تایید شرایط ورود"
 
 def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, entry_min, entry_max, sl, tp1, tp2):
     emoji = "🟢" if side == "LONG" else "🔴"
@@ -250,14 +296,14 @@ def send_telegram_signal(symbol, market_type, side, price, pattern, btc_trend, e
     market_label = "💎 بازار اسپات (Spot)" if market_type == "SPOT" else "⚡️ بازار تعهدی (Margin)"
 
     message = (
-        f"{emoji} سیگنال {side_title} ({symbol})\n"
+        f"{emoji} سیگنال {side_title} (<b>#{symbol}</b>)\n"
         f"📌 نوع بازار: {market_label}\n"
-        f"💵 قیمت فعلی: {format_price(price)}\n"
+        f"💵 قیمت فعلی: <code>{format_number(price)}</code>\n"
         f"📊 الگو: {pattern}\n\n"
-        f"🎯 محدوده ورود: {format_price(entry_min)} - {format_price(entry_max)}\n"
-        f"📉 حد سود اول (TP1): {format_price(tp1)}\n"
-        f"🚀 حد سود دوم (TP2): {format_price(tp2)}\n"
-        f"🛑 حد ضرر (SL): {format_price(sl)}\n"
+        f"🎯 محدوده ورود: <code>{format_number(entry_min)}</code> تا <code>{format_number(entry_max)}</code>\n"
+        f"📉 حد سود اول (TP1): <code>{format_number(tp1)}</code>\n"
+        f"🚀 حد سود دوم (TP2): <code>{format_number(tp2)}</code>\n"
+        f"🛑 حد ضرر (SL): <code>{format_number(sl)}</code>\n"
         f"⚡️ روند بیت‌کوین: {btc_trend}"
     )
     send_telegram_message(message)
@@ -278,14 +324,14 @@ def send_tp1_alert(symbol, market_type, side, entry_price, current_price, tp1):
     msg = (
         "🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩\n"
         "🎯 تارگت اول لمس شد! (TP1)\n"
-        f"💰 سود ثبت‌شده: {pnl_text}\n"
+        f"💰 سود ثبت‌شده: <code>{pnl_text}</code>\n"
         "🟩🟩🟩🟩🟩🟩🟩🟩🟩🟩\n\n"
-        f"💎 نماد: #{symbol}\n"
+        f"💎 نماد: <b>#{symbol}</b>\n"
         f"⚡️ موقعیت: {side_fa} | {market_fa}\n\n"
-        f"▫️ قیمت ورود: {format_price(entry_price)}\n"
-        f"▫️ قیمت لمس: {format_price(current_price)}\n"
-        f"▫️ حد سود ۱: {format_price(tp1)}\n\n"
-        "⚠️ حد ضرر معامله به نقطه ورود منتقل شد (Free-Risk)."
+        f"▫️ قیمت ورود: <code>{format_number(entry_price)}</code>\n"
+        f"▫️ قیمت لمس: <code>{format_number(current_price)}</code>\n"
+        f"▫️ حد سود ۱: <code>{format_number(tp1)}</code>\n\n"
+        "⚠️ پیشنهاد ریسک‌فری: انتقال حد ضرر به نقطه ورود."
     )
     send_telegram_message(msg)
 
@@ -305,47 +351,16 @@ def send_sl_alert(symbol, market_type, side, entry_price, current_price, sl):
     msg = (
         "🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥\n"
         "🛑 حد ضرر فعال شد! (STOP)\n"
-        f"🔻 برآیند معامله: {pnl_text}\n"
+        f"🔻 برآیند معامله: <code>{pnl_text}</code>\n"
         "🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥\n\n"
-        f"💎 نماد: #{symbol}\n"
+        f"💎 نماد: <b>#{symbol}</b>\n"
         f"⚡️ موقعیت: {side_fa} | {market_fa}\n\n"
-        f"▫️ قیمت ورود: {format_price(entry_price)}\n"
-        f"▫️ قیمت خروج: {format_price(current_price)}\n"
-        f"▫️ حد ضرر: {format_price(sl)}\n\n"
-        "⛔️ پوزیشن با فعال شدن استاپ بسته شد."
+        f"▫️ قیمت ورود: <code>{format_number(entry_price)}</code>\n"
+        f"▫️ قیمت خروج: <code>{format_number(current_price)}</code>\n"
+        f"▫️ حد ضرر: <code>{format_number(sl)}</code>\n\n"
+        "⛔️ استاپ‌لاس لمس شد."
     )
     send_telegram_message(msg)
-
-def get_candles(symbol, timeframe="15m"):
-    now = int(time.time())
-    lookback = 60 * 60 * 24 * 3
-    url = "https://api.bitpin.org/api/v1/mkt/candles/"
-    params = {
-        "symbol": symbol,
-        "from": now - lookback,
-        "to": now,
-        "res": timeframe
-    }
-    try:
-        res = session.get(url, params=params, timeout=7)
-        if res.status_code == 200:
-            data = res.json()
-            if isinstance(data, list) and len(data) > 0:
-                candles_list = []
-                for item in data:
-                    ts_val = item.get("ts", item.get("time", 0))
-                    candles_list.append({
-                        "close": float(item["close"]),
-                        "high": float(item["high"]),
-                        "low": float(item["low"]),
-                        "volume": float(item.get("volume", 0)),
-                        "time": normalize_ts(ts_val)
-                    })
-                return candles_list
-        return []
-    except Exception as e:
-        print(f"[ERROR] Candle fetch exception for {symbol}: {e}")
-        return []
 
 def get_market_trend():
     try:
@@ -373,12 +388,20 @@ def analyze_market(symbol, market_type, candles, market_trend):
     if len(candles) < 30:
         return
 
+    last_closed_candle = candles[-2]
+    candle_ts = last_closed_candle["time"]
+    state_key = f"{symbol}_{market_type}"
+    
+    is_new_candle = last_processed_candle_time.get(state_key) != candle_ts
+    if is_new_candle:
+        last_processed_candle_time[state_key] = candle_ts
+
     current_price = candles[-1]["close"]
-    last_candle_time = candles[-1]["time"]
 
     base_key_long = f"{symbol}_{market_type}_LONG"
     base_key_short = f"{symbol}_{market_type}_SHORT"
 
+    # مدیریت پوزیشن‌های باز در هر دور اجرا می‌شود
     for base_key in (base_key_long, base_key_short):
         saved = last_signals.get(base_key)
         if not saved:
@@ -389,7 +412,6 @@ def analyze_market(symbol, market_type, candles, market_trend):
         sl_val = saved.get("sl")
         tp1 = saved["tp1"]
 
-        # ۱. اولویت اول: بررسی حد ضرر (Stop Loss)
         if not sl_notified.get(base_key, False) and sl_val:
             is_sl_hit = False
             if side == "LONG" and current_price <= sl_val:
@@ -405,29 +427,29 @@ def analyze_market(symbol, market_type, candles, market_trend):
                 sl_notified.pop(base_key, None)
                 continue
 
-        # ۲. اولویت دوم: بررسی تارگت اول (TP1)
         if not tp1_notified.get(base_key, False):
             if side == "LONG" and current_price >= tp1 * 0.998:
                 send_tp1_alert(symbol, market_type, "LONG", entry_p, current_price, tp1)
                 tp1_notified[base_key] = True
-                # ریسک‌فری: انتقال استاپ‌لاس به نقطه ورود
                 last_signals[base_key]["sl"] = entry_p
             elif side == "SHORT" and current_price <= tp1 * 1.002:
                 send_tp1_alert(symbol, market_type, "SHORT", entry_p, current_price, tp1)
                 tp1_notified[base_key] = True
-                # ریسک‌فری: انتقال استاپ‌لاس به نقطه ورود
                 last_signals[base_key]["sl"] = entry_p
 
-    signal_side, breakout_level, reason = check_market_condition_and_signal(candles, VOLUME_MULTIPLIER)
+    # تحلیل جدید فقط وقتی کندل جدید بسته شده باشد انجام می‌شود
+    if not is_new_candle:
+        return
+
+    signal_side, breakout_level, eval_price, reason = check_market_condition_and_signal(symbol, candles, VOLUME_MULTIPLIER)
 
     if market_trend == "BTC_DUMPING":
         return
 
+    # فیلتر روند (در بازار NEUTRAL اجازه سیگنال با احتیاط داده می‌شود مگر در خلاف جهت روند اصلی)
     if market_trend == "BULLISH" and signal_side == "SHORT":
         return
     if market_trend == "BEARISH" and signal_side == "LONG":
-        return
-    if market_trend == "NEUTRAL":
         return
 
     if signal_side == "LONG":
@@ -442,25 +464,25 @@ def analyze_market(symbol, market_type, candles, market_trend):
                 return
 
         sl = breakout_level * (1 - SL_PERCENT)
-        tp1 = current_price * (1 + TP1_PERCENT)
-        tp2 = current_price * (1 + TP2_PERCENT)
+        tp1 = eval_price * (1 + TP1_PERCENT)
+        tp2 = eval_price * (1 + TP2_PERCENT)
         in_low = breakout_level * 0.998
         in_high = breakout_level * 1.002
 
         last_signals[base_key] = {
             "side": "LONG",
-            "entry": current_price,
+            "entry": eval_price,
             "sl": sl,
             "tp1": tp1,
             "pattern": reason,
-            "price": current_price,
+            "price": eval_price,
             "ts": now_ts,
-            "candle_time": last_candle_time
+            "candle_time": candle_ts
         }
         tp1_notified[base_key] = False
         sl_notified[base_key] = False
 
-        send_telegram_signal(symbol, market_type, "LONG", current_price, reason, market_trend, in_low, in_high, sl, tp1, tp2)
+        send_telegram_signal(symbol, market_type, "LONG", eval_price, reason, market_trend, in_low, in_high, sl, tp1, tp2)
         return
 
     elif signal_side == "SHORT" and market_type == "MARGIN":
@@ -475,25 +497,25 @@ def analyze_market(symbol, market_type, candles, market_trend):
                 return
 
         sl = breakout_level * (1 + SL_PERCENT)
-        tp1 = current_price * (1 - TP1_PERCENT)
-        tp2 = current_price * (1 - TP2_PERCENT)
+        tp1 = eval_price * (1 - TP1_PERCENT)
+        tp2 = eval_price * (1 - TP2_PERCENT)
         in_low = breakout_level * 0.998
         in_high = breakout_level * 1.002
 
         last_signals[base_key] = {
             "side": "SHORT",
-            "entry": current_price,
+            "entry": eval_price,
             "sl": sl,
             "tp1": tp1,
             "pattern": reason,
-            "price": current_price,
+            "price": eval_price,
             "ts": now_ts,
-            "candle_time": last_candle_time
+            "candle_time": candle_ts
         }
         tp1_notified[base_key] = False
         sl_notified[base_key] = False
 
-        send_telegram_signal(symbol, market_type, "SHORT", current_price, reason, market_trend, in_low, in_high, sl, tp1, tp2)
+        send_telegram_signal(symbol, market_type, "SHORT", eval_price, reason, market_trend, in_low, in_high, sl, tp1, tp2)
 
 if __name__ == "__main__":
     server_thread = threading.Thread(target=run_server, daemon=True)
@@ -502,7 +524,7 @@ if __name__ == "__main__":
     ping_thread = threading.Thread(target=keep_alive_ping, daemon=True)
     ping_thread.start()
 
-    send_telegram_message("🤖 ربات تحلیل‌گر بیت‌پین با سیستم هشدار تلگرامی راه‌اندازی شد و تست اتصال با موفقیت انجام گرفت! 🚀")
+    send_telegram_message("🤖 ربات تحلیل‌گر بیت‌پین با موفقیت و نسخه بهینه‌شده استارت شد! 🚀")
 
     spot_symbols = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "ADA_USDT",
