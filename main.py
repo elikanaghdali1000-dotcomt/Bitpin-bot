@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"  # توکن خود را اینجا قرار دهید
-TELEGRAM_CHAT_ID = "6643451227"    # چت‌آیدی خود را اینجا قرار دهید
+TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"  # توکن تلگرام
+TELEGRAM_CHAT_ID = "6643451227"    # چت‌آیدی تلگرام
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 API_URL = "https://api.bitpin.org/api/v1/mkt/candles/"
@@ -26,6 +26,9 @@ last_signals = {}
 tp1_notified = {}
 sl_notified = {}
 last_processed_candle_time = {}
+
+# سیستم کش روند ۱ ساعته برای جلوگیری از خطای Rate Limit بیت‌پین
+trend_cache = {}  # {symbol: (trend, timestamp)}
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -48,7 +51,7 @@ def format_number(val):
 
 def send_telegram_message(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram Token or Chat ID is missing!")
+        print("Telegram Token or Chat ID is missing!", flush=True)
         return False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -56,7 +59,7 @@ def send_telegram_message(text):
         res = session.post(url, data=payload, timeout=6)
         return res.status_code == 200
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"Telegram error: {e}", flush=True)
         return False
 
 class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
@@ -71,7 +74,7 @@ class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
 def run_server():
     port = int(os.getenv("PORT", 10000))
     server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    print(f"Web server started on 0.0.0.0:{port}")
+    print(f"Web server started on 0.0.0.0:{port}", flush=True)
     server.serve_forever()
 
 def keep_alive_ping():
@@ -88,9 +91,15 @@ def keep_alive_ping():
 # ================= توابع بازار و تحلیل تکنیکال =================
 
 def get_market_trend(symbol):
-    """بررسی روند ۱ ساعته و چک کردن مقاومت/حمایت پیش رو"""
+    """بررسی روند ۱ ساعته با کش ۳۰۰ ثانیه‌ای (۵ دقیقه) برای عدم مسدودی IP"""
+    now = time.time()
+    if symbol in trend_cache:
+        cached_trend, cached_time = trend_cache[symbol]
+        if now - cached_time < 300:
+            return cached_trend
+
     try:
-        url = f"{API_URL}?symbol={symbol}&resolution=60&to={int(time.time())}&count=30"
+        url = f"{API_URL}?symbol={symbol}&resolution=60&to={int(now)}&count=30"
         response = session.get(url, timeout=10)
         data = response.json()
         if 'result' in data and len(data['result']) > 0:
@@ -112,13 +121,18 @@ def get_market_trend(symbol):
             near_resistance = (recent_high - current_p) / current_p < 0.003
             near_support = (current_p - recent_low) / current_p < 0.003
 
+            trend = "NEUTRAL"
             if ema50 > ema200 and not near_resistance:
-                return "BULLISH"
+                trend = "BULLISH"
             elif ema50 < ema200 and not near_support:
-                return "BEARISH"
+                trend = "BEARISH"
+            
+            trend_cache[symbol] = (trend, now)
+            return trend
+        trend_cache[symbol] = ("NEUTRAL", now)
         return "NEUTRAL"
     except Exception:
-        return "NEUTRAL"
+        return trend_cache.get(symbol, ("NEUTRAL", 0))[0]
 
 def fetch_candles(symbol, resolution="15", count=150):
     try:
@@ -131,7 +145,7 @@ def fetch_candles(symbol, resolution="15", count=150):
                 df[col] = df[col].astype(float)
             return df
     except Exception as e:
-        print(f"خطا در دریافت کندل‌های {symbol}: {e}")
+        print(f"خطا در دریافت کندل‌های {symbol}: {e}", flush=True)
     return None
 
 def manage_open_positions(symbol, market_type, current_price):
@@ -175,24 +189,27 @@ def manage_open_positions(symbol, market_type, current_price):
                 last_signals[base_key]["sl"] = entry_p
 
 def analyze_and_signal(symbol, market_type):
-    current_minute = datetime.now(timezone.utc).minute
-    if current_minute % 15 not in [12, 13, 14, 0]:
-        return
-
     df = fetch_candles(symbol, RESOLUTION, count=150)
     if df is None or len(df) < PERIOD + 10:
         return
 
     current_price = df['close'].iloc[-1]
+    
+    # مدیریت پوزیشن باز به صورت پیوسته (در تمام دقایق بدون تاخیر)
     manage_open_positions(symbol, market_type, current_price)
 
-    last_closed_candle = df.iloc[-2]
-    candle_ts = last_closed_candle['timestamp']
+    # فیلتر دقایق پایانی کندل برای ورود به سیگنال جدید
+    current_minute = datetime.now(timezone.utc).minute
+    if current_minute % 15 not in [12, 13, 14, 0]:
+        return
+
+    # استفاده از تایم‌استمپ آخرین کندل جاری جهت عدم ثبت سیگنال تکراری در همان کندل
+    current_candle = df.iloc[-1]
+    candle_ts = current_candle['timestamp']
     state_key = f"{symbol}_{market_type}"
     
     if last_processed_candle_time.get(state_key) == candle_ts:
         return
-    last_processed_candle_time[state_key] = candle_ts
 
     closes = df['close']
     highs = df['high']
@@ -209,7 +226,8 @@ def analyze_and_signal(symbol, market_type):
     ema200 = closes.ewm(span=200, adjust=False).mean()
     avg_volume = volumes.rolling(window=20).mean()
 
-    i = -2
+    # بررسی وضعیت کندل لایو در حال بسته شدن (دقایق ۱۲ تا ۱۴)
+    i = -1
     c_close = closes.iloc[i]
     c_open = df['open'].iloc[i]
     c_high = highs.iloc[i]
@@ -240,6 +258,7 @@ def analyze_and_signal(symbol, market_type):
         if is_breakout or is_pullback:
             base_key = f"{symbol}_{market_type}_LONG"
             if base_key not in last_signals:
+                last_processed_candle_time[state_key] = candle_ts
                 sl = c_close * (1 - SL_PERCENT)
                 tp1 = c_close * (1 + TP1_PERCENT)
                 tp2 = c_close * (1 + TP2_PERCENT)
@@ -268,6 +287,7 @@ def analyze_and_signal(symbol, market_type):
         if is_breakout_s or is_pullback_s:
             base_key = f"{symbol}_{market_type}_SHORT"
             if base_key not in last_signals:
+                last_processed_candle_time[state_key] = candle_ts
                 sl = c_close * (1 + SL_PERCENT)
                 tp1 = c_close * (1 - TP1_PERCENT)
                 tp2 = c_close * (1 - TP2_PERCENT)
@@ -334,5 +354,5 @@ if __name__ == "__main__":
 
             time.sleep(CHECK_INTERVAL)
         except Exception as e:
-            print(f"خطای حلقه اصلی: {e}")
+            print(f"خطای حلقه اصلی: {e}", flush=True)
             time.sleep(10)
