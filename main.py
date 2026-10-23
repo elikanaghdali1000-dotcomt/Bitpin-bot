@@ -7,326 +7,180 @@ import threading
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j905Q2BGXe3BZFJ3jdw8Ow8myV..."
-TELEGRAM_CHAT_ID = "6643451227"
+# ================= تنظیمات اصلی =================
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8947033412:AAG-Wfh8j905Q2BGXe3BZFJ3jdw8Ow8myV...")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 API_URL = "https://api.bitpin.org/api/v1/mkt/candles/"
+TICKERS_URL = "https://api.bitpin.org/api/v1/mkt/tickers/"
+
 RESOLUTION = "15"           # تایم‌فریم ۱۵ دقیقه
 PERIOD = 20                 # دوره بولینگر
-SL_PERCENT = 0.012          # حد ضرر: 1.2 درصد
-TP1_PERCENT = 0.015         # حد سود اول: 1.5 درصد
-TP2_PERCENT = 0.030         # حد سود دوم: 3 درصد
-MIN_BANDWIDTH = 0.008       # حداقل پهنای باند برای فیلتر رنج
+STD_DEV = 2.0               # انحراف معیار بولینگر
+MIN_BANDWIDTH = 0.008       # حداقل پهنای باند برای فشرده نبودن مطلق
 VOLUME_MULTIPLIER = 1.4     # ضریب حجم بریک‌آوت
-CHECK_INTERVAL = 30         # بررسی هر 30 ثانیه برای دقت بالا در دقایق پایانی
 
-last_signals = {}           
-tp1_notified = {}
-sl_notified = {}
-last_processed_candle_time = {}
-
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json"
-}
-session = requests.Session()
-session.headers.update(HEADERS)
-
-# ================= توابع ارسال پیام و وب‌سرور Keep-Alive =================
-
-def format_number(val):
-    if val is None:
-        return "0"
-    if val < 0.0001:
-        return f"{val:.8f}".rstrip('0').rstrip('.')
-    elif val < 1:
-        return f"{val:.4f}".rstrip('0').rstrip('.')
-    else:
-        return f"{val:,.2f}"
-
-def send_telegram_message(text):
+# ================= توابع تلگرام =================
+def send_telegram(text):
+    if not TELEGRAM_BOT_TOKEN or TELEGRAM_BOT_TOKEN == "PUT_TOKEN_HERE":
+        print("[Telegram] Token is not set!")
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "Markdown"
+    }
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-        res = session.post(url, data=payload, timeout=6)
-        return res.status_code == 200
+        response = requests.post(url, json=payload, timeout=10)
+        if response.status_code != 200:
+            print(f"[Telegram Error] {response.text}")
     except Exception as e:
-        print(f"Telegram error: {e}")
-        return False
+        print(f"[Telegram Exception] {e}")
 
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+# ================= دریافت لیست ارزها =================
+def get_active_symbols():
+    try:
+        response = requests.get(TICKERS_URL, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            tickers = data.get("results", data) if isinstance(data, dict) else data
+            symbols = []
+            for item in tickers:
+                # فقط بازار پایه تومان یا تتر
+                symbol = item.get("symbol", "")
+                if symbol and (symbol.endswith("_IRT") or symbol.endswith("_USDT")):
+                    symbols.append(symbol)
+            print(f"[Bitpin] Total symbols found: {len(symbols)}")
+            return symbols[:30] # محدود کردن به 30 ارز پرطرفدار برای جلوگیری از بن شدن IP
+    except Exception as e:
+        print(f"[Bitpin Error] Fetching tickers failed: {e}")
+    # لیست پیش‌فرض در صورت خطا
+    return ["BTC_IRT", "ETH_IRT", "SOL_IRT", "DOGE_IRT", "PEPE_IRT"]
+
+# ================= وب‌سرور Keep-Alive برای رندر =================
+class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bitpin Trading Bot is Active & Running!")
+        self.wfile.write(b"Bitpin Trading Bot is running live!")
     def log_message(self, format, *args):
         return
 
 def run_server():
-    port = int(os.getenv("PORT", 10000))
-    server = HTTPServer(('0.0.0.0', port), SimpleHTTPRequestHandler)
-    print(f"Web server started on 0.0.0.0:{port}")
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    print(f"[Server] Keep-alive server running on port {port}")
     server.serve_forever()
 
-def keep_alive_ping():
-    time.sleep(30)
-    while True:
-        try:
-            target_url = APP_URL
-            if target_url:
-                session.get(target_url, timeout=10)
-        except Exception:
-            pass
-        time.sleep(480)
-
-# ================= توابع بازار و تحلیل تکنیکال =================
-
-def get_market_trend(symbol):
-    """بررسی روند ۱ ساعته و چک کردن مقاومت/حمایت پیش رو"""
+# ================= منطق اصلی تحلیل بازار =================
+def fetch_candles(symbol, resolution="15", limit=100):
     try:
-        url = f"{API_URL}?symbol={symbol}&resolution=60&to={int(time.time())}&count=30"
-        response = session.get(url, timeout=10)
-        data = response.json()
-        if 'result' in data and len(data['result']) > 0:
-            df_1h = pd.DataFrame(data['result'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            for col in ['open', 'high', 'low', 'close']:
-                df_1h[col] = df_1h[col].astype(float)
-            
-            closes = df_1h['close']
-            highs = df_1h['high']
-            lows = df_1h['low']
-            
-            ema50 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
-            ema200 = closes.ewm(span=50, adjust=False).mean().iloc[-1]
-            current_p = closes.iloc[-1]
-            
-            recent_high = highs.iloc[-10:].max()
-            recent_low = lows.iloc[-10:].min()
-            
-            near_resistance = (recent_high - current_p) / current_p < 0.003
-            near_support = (current_p - recent_low) / current_p < 0.003
-
-            if ema50 > ema200 and not near_resistance:
-                return "BULLISH"
-            elif ema50 < ema200 and not near_support:
-                return "BEARISH"
-        return "NEUTRAL"
-    except Exception:
-        return "NEUTRAL"
-
-def fetch_candles(symbol, resolution="15", count=150):
-    try:
-        url = f"{API_URL}?symbol={symbol}&resolution={resolution}&to={int(time.time())}&count={count}"
-        response = session.get(url, timeout=10)
-        data = response.json()
-        if 'result' in data and len(data['result']) > 0:
-            df = pd.DataFrame(data['result'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
-                df[col] = df[col].astype(float)
-            return df
+        end_time = int(time.time())
+        start_time = end_time - (limit * int(resolution) * 60 * 3)
+        params = {
+            "symbol": symbol,
+            "resolution": resolution,
+            "start_time": start_time,
+            "end_time": end_time
+        }
+        response = requests.get(API_URL, params=params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            if isinstance(data, list) and len(data) > 0:
+                df = pd.DataFrame(data)
+                # ساختار معمول بیت‌پین: [timestamp, open, high, low, close, volume]
+                if len(df.columns) >= 6:
+                    df = df.iloc[:, :6]
+                    df.columns = ['time', 'open', 'high', 'low', 'close', 'volume']
+                    for col in ['open', 'high', 'low', 'close', 'volume']:
+                        df[col] = pd.to_numeric(df[col], errors='coerce')
+                    df.dropna(inplace=True)
+                    return df
     except Exception as e:
-        print(f"خطا در دریافت کندل‌های {symbol}: {e}")
+        print(f"[Candle Error] {symbol}: {e}")
     return None
 
-def manage_open_positions(symbol, market_type, current_price):
-    for base_key in [f"{symbol}_{market_type}_LONG", f"{symbol}_{market_type}_SHORT"]:
-        saved = last_signals.get(base_key)
-        if not saved:
+def analyze_market():
+    print(f"\n[{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')}] Starting market scan...")
+    symbols = get_active_symbols()
+    
+    for symbol in symbols:
+        df = fetch_candles(symbol, RESOLUTION, limit=50)
+        if df is None or len(df) < PERIOD + 5:
             continue
+            
+        # محاسبات اندیکاتورها
+        df['sma'] = df['close'].rolling(window=PERIOD).mean()
+        df['std'] = df['close'].rolling(window=PERIOD).std()
+        df['upper'] = df['sma'] + (STD_DEV * df['std'])
+        df['lower'] = df['sma'] - (STD_DEV * df['std'])
+        df['bandwidth'] = (df['upper'] - df['lower']) / df['sma']
+        df['avg_vol'] = df['volume'].rolling(window=PERIOD).mean()
         
-        side = saved["side"]
-        entry_p = saved.get("entry", current_price)
-        sl_val = saved.get("sl")
-        tp1 = saved["tp1"]
+        # بررسی کندل آخر بسته شده (اندیس -2 چون کندل آخر در حال تشکیل است)
+        c_open = df['open'].iloc[-2]
+        c_high = df['high'].iloc[-2]
+        c_low = df['low'].iloc[-2]
+        c_close = df['close'].iloc[-2]
+        c_vol = df['volume'].iloc[-2]
+        c_avg_vol = df['avg_vol'].iloc[-2]
+        c_sma = df['sma'].iloc[-2]
+        c_upper = df['upper'].iloc[-2]
+        c_lower = df['lower'].iloc[-2]
+        c_bandwidth = df['bandwidth'].iloc[-2]
+        
+        c_body = abs(c_close - c_open)
+        c_range = c_high - c_low
+        if c_range == 0: 
+            continue
+            
+        is_small_body = (c_body <= c_range * 0.6)
+        
+        # شرایط پولبک لانگ
+        is_pullback_long = (c_low <= c_sma * 1.005) and (c_close > c_open) and is_small_body and (c_vol <= c_avg_vol)
+        
+        if is_pullback_long:
+            print(f"[SIGNAL FOUND] Long pullback on {symbol}! Price: {c_close}")
+            msg = f"🚀 **سیگنال لانگ (خرید)**\nارز: `{symbol}`\nقیمت ورود: `{c_close}`"
+            send_telegram(msg)
+            
+        # شرایط پولبک شورت
+        is_pullback_short = (c_high >= c_sma * 0.995) and (c_close < c_open) and is_small_body and (c_vol <= c_avg_vol)
+        
+        if is_pullback_short:
+            print(f"[SIGNAL FOUND] Short pullback on {symbol}! Price: {c_close}")
+            msg = f"📉 **سیگنال شورت (فروش تعهدی)**\nارز: `{symbol}`\nقیمت ورود: `{c_close}`"
+            send_telegram(msg)
 
-        # بررسی حد ضرر (SL)
-        if not sl_notified.get(base_key, False) and sl_val:
-            if (side == "LONG" and current_price <= sl_val) or (side == "SHORT" and current_price >= sl_val):
-                pnl = ((current_price - entry_p) / entry_p) * 100 if side == "LONG" else ((entry_p - current_price) / entry_p) * 100
-                msg = (
-                    f"🛑 <b>هشدار حد ضرر (Stop Loss) - #{symbol}</b>\n"
-                    f"📌 بازار: {market_type} ({side})\n"
-                    f"💵 قیمت خروج: <code>{format_number(current_price)}</code>\n"
-                    f"📉 میزان زیان: <code>{pnl:.2f}% ❌</code>"
-                )
-                send_telegram_message(msg)
-                sl_notified[base_key] = True
-                last_signals.pop(base_key, None)
-                continue
+    print("[Scan Completed] Waiting for next interval...")
 
-        # بررسی تارگت اول (TP1) و ریسک‌فری
-        if not tp1_notified.get(base_key, False):
-            if (side == "LONG" and current_price >= tp1 * 0.998) or (side == "SHORT" and current_price <= tp1 * 1.002):
-                pnl = ((current_price - entry_p) / entry_p) * 100 if side == "LONG" else ((entry_p - current_price) / entry_p) * 100
-                msg = (
-                    f"🎯 <b>تارگت اول لمس شد! (#{symbol})</b>\n"
-                    f"📌 بازار: {market_type} ({side})\n"
-                    f"📈 سود ثبت‌شده: <code>+{pnl:.2f}% 🚀</code>\n"
-                    f"🛡 حد ضرر به نقطه ورود (ریسک‌فری) منتقل شد."
-                )
-                send_telegram_message(msg)
-                tp1_notified[base_key] = True
-                last_signals[base_key]["sl"] = entry_p
-
-def analyze_and_signal(symbol, market_type):
-    # بررسی زمان: تمرکز روی دقایق پایانی کندل (دقایق ۱۲، ۱۳، ۱۴ یا ۰)
-    current_minute = datetime.now(timezone.utc).minute
-    if current_minute % 15 not in [12, 13, 14, 0]:
-        return
-
-    df = fetch_candles(symbol, RESOLUTION, count=150)
-    if df is None or len(df) < PERIOD + 10:
-        return
-
-    current_price = df['close'].iloc[-1]
-    manage_open_positions(symbol, market_type, current_price)
-
-    last_closed_candle = df.iloc[-2]
-    candle_ts = last_closed_candle['timestamp']
-    state_key = f"{symbol}_{market_type}"
+# ================= حلقه زمان‌بندی اصلی =================
+def bot_loop():
+    print("Bot loop started. Sending startup notification...")
+    send_telegram("🤖 **ربات معامله‌گری بیت‌پین با موفقیت روشن شد و در حال رصد بازار است.**")
     
-    if last_processed_candle_time.get(state_key) == candle_ts:
-        return
-    last_processed_candle_time[state_key] = candle_ts
-
-    closes = df['close']
-    highs = df['high']
-    lows = df['low']
-    volumes = df['volume']
-    
-    sma = closes.rolling(window=PERIOD).mean()
-    std = closes.rolling(window=PERIOD).std()
-    upper_band = sma + (std * 2.0)
-    lower_band = sma - (std * 2.0)
-    bandwidth = (upper_band - lower_band) / sma
-    
-    ema50 = closes.ewm(span=50, adjust=False).mean()
-    ema200 = closes.ewm(span=200, adjust=False).mean()
-    avg_volume = volumes.rolling(window=20).mean()
-
-    i = -2
-    c_close = closes.iloc[i]
-    c_open = df['open'].iloc[i]
-    c_high = highs.iloc[i]
-    c_low = lows.iloc[i]
-    c_vol = volumes.iloc[i]
-    c_sma = sma.iloc[i]
-    c_upper = upper_band.iloc[i]
-    c_lower = lower_band.iloc[i]
-    c_bw = bandwidth.iloc[i]
-    c_avg_vol = avg_volume.iloc[i]
-
-    if c_bw < MIN_BANDWIDTH:
-        return
-
-    trend_1h = get_market_trend(symbol)
-    is_bullish = ema50.iloc[i] > ema200.iloc[i]
-    is_bearish = ema50.iloc[i] < ema200.iloc[i]
-
-    # ویژگی‌های کندل تایید پولبک (بدنه کوچک و حجم پایین‌تر از میانگین)
-    c_body = abs(c_close - c_open)
-    c_range = c_high - c_low
-    is_small_body = c_body <= c_range * 0.6 if c_range > 0 else True
-
-    # سیگنال LONG
-    if trend_1h == "BULLISH" and is_bullish:
-        is_breakout = (c_close > c_upper) and (c_close > c_open) and (c_vol > c_avg_vol * VOLUME_MULTIPLIER)
-        is_pullback = (c_low <= c_sma * 1.005) and (c_close > c_open) and is_small_body and (c_vol <= c_avg_vol)
-
-        if is_breakout or is_pullback:
-            base_key = f"{symbol}_{market_type}_LONG"
-            if base_key not in last_signals:
-                sl = c_close * (1 - SL_PERCENT)
-                tp1 = c_close * (1 + TP1_PERCENT)
-                tp2 = c_close * (1 + TP2_PERCENT)
-                
-                last_signals[base_key] = {"side": "LONG", "entry": c_close, "sl": sl, "tp1": tp1}
-                tp1_notified[base_key] = False
-                sl_notified[base_key] = False
-
-                pattern = "بریک‌آوت صعودی 🚀" if is_breakout else "پولبک صعودی (تاییدشده با کندل کوچک و کم‌حجم) 📈"
-                msg = (
-                    f"🟢 <b>سیگنال خرید (لانگ) - #{symbol}</b>\n"
-                    f"📌 بازار: {market_type} (دقیقه پایانی کندل)\n"
-                    f"💵 قیمت ورود: <code>{format_number(c_close)}</code>\n"
-                    f"📊 الگو: {pattern}\n"
-                    f"🎯 هدف ۱: <code>{format_number(tp1)}</code>\n"
-                    f"🚀 هدف ۲: <code>{format_number(tp2)}</code>\n"
-                    f"🛑 حد ضرر اولیه: <code>{format_number(sl)}</code>"
-                )
-                send_telegram_message(msg)
-
-    # سیگنال SHORT
-    if market_type == "MARGIN" and trend_1h == "BEARISH" and is_bearish:
-        is_breakout_s = (c_close < c_lower) and (c_close < c_open) and (c_vol > c_avg_vol * VOLUME_MULTIPLIER)
-        is_pullback_s = (c_high >= c_sma * 0.995) and (c_close < c_open) and is_small_body and (c_vol <= c_avg_vol)
-
-        if is_breakout_s or is_pullback_s:
-            base_key = f"{symbol}_{market_type}_SHORT"
-            if base_key not in last_signals:
-                sl = c_close * (1 + SL_PERCENT)
-                tp1 = c_close * (1 - TP1_PERCENT)
-                tp2 = c_close * (1 - TP2_PERCENT)
-                
-                last_signals[base_key] = {"side": "SHORT", "entry": c_close, "sl": sl, "tp1": tp1}
-                tp1_notified[base_key] = False
-                sl_notified[base_key] = False
-
-                pattern = "بریک‌آوت نزولی 🔻" if is_breakout_s else "پولبک نزولی (تاییدشده با کندل کوچک و کم‌حجم) 📉"
-                msg = (
-                    f"🔴 <b>سیگنال فروش (شورت) - #{symbol}</b>\n"
-                    f"📌 بازار: تعهدی (دقیقه پایانی کندل)\n"
-                    f"💵 قیمت ورود: <code>{format_number(c_close)}</code>\n"
-                    f"📊 الگو: {pattern}\n"
-                    f"🎯 هدف ۱: <code>{format_number(tp1)}</code>\n"
-                    f"🚀 هدف ۲: <code>{format_number(tp2)}</code>\n"
-                    f"🛑 حد ضرر اولیه: <code>{format_number(sl)}</code>"
-                )
-                send_telegram_message(msg)
-
-# ================= حلقه اصلی =================
-if __name__ == "__main__":
-    threading.Thread(target=run_server, daemon=True).start()
-    threading.Thread(target=keep_alive_ping, daemon=True).start()
-
-    send_telegram_message("🤖 ربات هوشمند بیت‌پین با فیلتر دقیق دقیقه ۱۲ و کندل تایید پولبک راه‌اندازی شد! 🚀")
-
-    spot_watchlist = [
-        "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "PEPE_USDT", "NEAR_USDT", "SUI_USDT",
-        "LINK_USDT", "ADA_USDT", "AVAX_USDT", "ZEC_USDT", "ARPA_USDT", "FTM_USDT", "MATIC_USDT", "SHIB_USDT",
-        "TON_USDT", "APT_USDT", "AR_USDT", "ATOM_USDT", "BCH_USDT", "BNB_USDT", "DOT_USDT", "ETC_USDT",
-        "FIL_USDT", "ICP_USDT", "INJ_USDT", "LTC_USDT", "OP_USDT", "POL_USDT", "RNDR_USDT", "RENDER_USDT",
-        "RUNE_USDT", "SAND_USDT", "TIA_USDT", "UNI_USDT", "WLD_USDT", "XLM_USDT", "XMR_USDT", "TRX_USDT",
-        "FLOKI_USDT", "BONK_USDT", "DOGS_USDT", "HMSTR_USDT", "NOT_USDT", "KAS_USDT", "SEI_USDT", "MANA_USDT", 
-        "CHZ_USDT", "CRV_USDT", "GRT_USDT", "AAVE_USDT", "MKR_USDT", "SNX_USDT", "ENJ_USDT", "BAT_USDT", 
-        "ZRX_USDT", "BAL_USDT", "COMP_USDT", "YFI_USDT", "SUSHI_USDT", "STX_USDT", "IMX_USDT", "GMT_USDT", 
-        "GAL_USDT", "EDU_USDT", "HOOK_USDT", "ID_USDT", "LQTY_USDT", "AGIX_USDT", "FET_USDT", "OCEAN_USDT", 
-        "PHB_USDT", "CFX_USDT", "ACH_USDT", "IOST_USDT"
-    ]
-    spot_watchlist = list(set(spot_watchlist))
-    
-    margin_watchlist = [
-        "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "PEPE_USDT", "NEAR_USDT", 
-        "SUI_USDT", "LINK_USDT", "ADA_USDT", "AVAX_USDT", "ZEC_USDT", "FTM_USDT", "MATIC_USDT", 
-        "SHIB_USDT", "TON_USDT", "APT_USDT", "INJ_USDT", "RNDR_USDT", "UNI_USDT", "ARB_USDT",
-        "OP_USDT", "ICP_USDT", "ATOM_USDT", "DOT_USDT", "LTC_USDT", "BCH_USDT", "TRX_USDT", "FIL_USDT"
-    ]
-    margin_watchlist = list(set(margin_watchlist))
-
     while True:
-        try:
-            for sym in spot_watchlist:
-                analyze_and_signal(sym, "SPOT")
-                time.sleep(0.1)
+        now = datetime.now(timezone.utc)
+        current_minute = now.minute
+        
+        # بررسی در دقایق 12، 13، 14 و 0 (ابتدای کندل جدید 15 دقیقه‌ای)
+        if current_minute in [12, 13, 14, 0]:
+            try:
+                analyze_market()
+            except Exception as e:
+                print(f"[Loop Error] {e}")
+            # خوابیدن برای جلوگیری از اجرای مکرر در یک دقیقه
+            time.sleep(60)
+        else:
+            time.sleep(15)
 
-            for sym in margin_watchlist:
-                analyze_and_signal(sym, "MARGIN")
-                time.sleep(0.1)
-
-            time.sleep(CHECK_INTERVAL)
-        except Exception as e:
-            print(f"خطای حلقه اصلی: {e}")
-            time.sleep(10)
+if __name__ == "__main__":
+    # اجرای وب‌سرور در یک ترد جداگانه
+    t_server = threading.Thread(target=run_server, daemon=True)
+    t_server.start()
+    
+    # اجرای حلقه اصلی ربات
+    bot_loop()
