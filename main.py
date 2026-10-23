@@ -7,9 +7,9 @@ import threading
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ================= تنظیمات اصلی =================
-TELEGRAM_BOT_TOKEN = os.getenv("8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo", "PUT_TOKEN_HERE")
-TELEGRAM_CHAT_ID = os.getenv("6643451227")
+# ================= تنظیمات اصلی و اطلاعات اختصاصی =================
+TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j905Q2BGXe3BZFJ3jdw8Ow8myV..."
+TELEGRAM_CHAT_ID = "6643451227"
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 API_URL = "https://api.bitpin.org/api/v1/mkt/candles/"
@@ -103,11 +103,9 @@ def get_market_trend(symbol):
             ema200 = closes.ewm(span=50, adjust=False).mean().iloc[-1]
             current_p = closes.iloc[-1]
             
-            # بررسی اینکه آیا قیمت به سقف یا کف اخیر ۱ ساعته (مقاومت/حمایت سنگین) چسبیده یا خیر
             recent_high = highs.iloc[-10:].max()
             recent_low = lows.iloc[-10:].min()
             
-            # اگر فاصله تا مقاومت خیلی کم باشد، به عنوان مانع تشخیص داده می‌شود
             near_resistance = (recent_high - current_p) / current_p < 0.003
             near_support = (current_p - recent_low) / current_p < 0.003
 
@@ -228,10 +226,15 @@ def analyze_and_signal(symbol, market_type):
     is_bullish = ema50.iloc[i] > ema200.iloc[i]
     is_bearish = ema50.iloc[i] < ema200.iloc[i]
 
+    # ویژگی‌های کندل تایید پولبک (بدنه کوچک و حجم پایین‌تر از میانگین)
+    c_body = abs(c_close - c_open)
+    c_range = c_high - c_low
+    is_small_body = c_body <= c_range * 0.6 if c_range > 0 else True
+
     # سیگنال LONG
     if trend_1h == "BULLISH" and is_bullish:
         is_breakout = (c_close > c_upper) and (c_close > c_open) and (c_vol > c_avg_vol * VOLUME_MULTIPLIER)
-        is_pullback = (c_low <= c_sma * 1.005) and (c_close > c_open) and (c_vol <= c_avg_vol * VOLUME_MULTIPLIER)
+        is_pullback = (c_low <= c_sma * 1.005) and (c_close > c_open) and is_small_body and (c_vol <= c_avg_vol)
 
         if is_breakout or is_pullback:
             base_key = f"{symbol}_{market_type}_LONG"
@@ -244,7 +247,7 @@ def analyze_and_signal(symbol, market_type):
                 tp1_notified[base_key] = False
                 sl_notified[base_key] = False
 
-                pattern = "بریک‌آوت صعودی 🚀" if is_breakout else "پولبک صعودی 📈"
+                pattern = "بریک‌آوت صعودی 🚀" if is_breakout else "پولبک صعودی (تاییدشده با کندل کوچک و کم‌حجم) 📈"
                 msg = (
                     f"🟢 <b>سیگنال خرید (لانگ) - #{symbol}</b>\n"
                     f"📌 بازار: {market_type} (دقیقه پایانی کندل)\n"
@@ -259,7 +262,7 @@ def analyze_and_signal(symbol, market_type):
     # سیگنال SHORT
     if market_type == "MARGIN" and trend_1h == "BEARISH" and is_bearish:
         is_breakout_s = (c_close < c_lower) and (c_close < c_open) and (c_vol > c_avg_vol * VOLUME_MULTIPLIER)
-        is_pullback_s = (c_high >= c_sma * 0.995) and (c_close < c_open) and (c_vol <= c_avg_vol * VOLUME_MULTIPLIER)
+        is_pullback_s = (c_high >= c_sma * 0.995) and (c_close < c_open) and is_small_body and (c_vol <= c_avg_vol)
 
         if is_breakout_s or is_pullback_s:
             base_key = f"{symbol}_{market_type}_SHORT"
@@ -272,7 +275,7 @@ def analyze_and_signal(symbol, market_type):
                 tp1_notified[base_key] = False
                 sl_notified[base_key] = False
 
-                pattern = "بریک‌آوت نزولی 🔻" if is_breakout_s else "پولبک نزولی 📉"
+                pattern = "بریک‌آوت نزولی 🔻" if is_breakout_s else "پولبک نزولی (تاییدشده با کندل کوچک و کم‌حجم) 📉"
                 msg = (
                     f"🔴 <b>سیگنال فروش (شورت) - #{symbol}</b>\n"
                     f"📌 بازار: تعهدی (دقیقه پایانی کندل)\n"
@@ -289,7 +292,7 @@ if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
     threading.Thread(target=keep_alive_ping, daemon=True).start()
 
-    send_telegram_message("🤖 ربات هوشمند بیت‌پین با فیلتر دقیق دقیقه ۱۲ و بررسی مقاومت ۱ ساعته راه‌اندازی شد! 🚀")
+    send_telegram_message("🤖 ربات هوشمند بیت‌پین با فیلتر دقیق دقیقه ۱۲ و کندل تایید پولبک راه‌اندازی شد! 🚀")
 
     spot_watchlist = [
         "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT", "PEPE_USDT", "NEAR_USDT", "SUI_USDT",
