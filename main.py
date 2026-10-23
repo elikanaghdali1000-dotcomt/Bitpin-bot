@@ -9,7 +9,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی =================
 TELEGRAM_BOT_TOKEN = os.getenv("8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo", "PUT_TOKEN_HERE")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6645431227")
+TELEGRAM_CHAT_ID = os.getenv("6643451227")
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 API_URL = "https://api.bitpin.org/api/v1/mkt/candles/"
