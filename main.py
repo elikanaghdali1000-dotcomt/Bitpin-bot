@@ -7,8 +7,8 @@ import numpy as np
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # --- تنظیمات تلگرام (استفاده از متغیرهای محیطی برای امنیت) ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "PUT_TOKEN_HERE")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "PUT_CHAT_ID_HERE")
+TELEGRAM_BOT_TOKEN = os.getenv("8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo", "PUT_TOKEN_HERE")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
 
 # آدرس عمومی رندر برای پینگ Keep-Alive
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
