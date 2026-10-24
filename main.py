@@ -25,7 +25,7 @@ TP1_PERCENT = 0.015         # حد سود اول: 1.5 درصد
 TP2_PERCENT = 0.030         # حد سود دوم: 3 درصد
 MIN_BANDWIDTH = 0.01        # حداقل پهنای باند برای فیلتر بازارهای رنج
 VOLUME_MULTIPLIER = 1.3     # ضریب حجم بریک‌آوت (بالای 1.3 برابر میانگین)
-PULLBACK_VOLUME_MULT = 1.8  # ضریب حجم پولبک / حالت رنج (بالای 1.8 برابر میانگین)
+PULLBACK_VOLUME_MULT = 1.0  # ضریب حجم پولبک (کمتر یا مساوی میانگین برای تایید خشکی حجم)
 CHECK_INTERVAL = 30         # بررسی هر 30 ثانیه
 
 # تاخیر ایمن برای جلوگیری از بلاک شدن توسط بیت‌پین
@@ -278,12 +278,13 @@ def analyze_and_signal(symbol, market_type):
         touched_roof = recent_break and (c_low <= c_upper * 1.008 and c_low >= c_sma)
         touched_sma = (c_low <= c_sma * 1.005)
         
+        # اصلاح شرط حجم پولبک لانگ (کمتر یا مساوی میانگین)
         is_pullback = (
             (touched_roof or touched_sma)
             and (c_close > c_open)
             and (c_close >= c_sma) 
             and is_small_body 
-            and (c_vol >= c_avg_vol * PULLBACK_VOLUME_MULT)
+            and (c_vol <= c_avg_vol * PULLBACK_VOLUME_MULT)
         )
 
         if is_breakout or is_pullback:
@@ -318,12 +319,13 @@ def analyze_and_signal(symbol, market_type):
         touched_floor = recent_break_s and (c_high >= c_lower * 0.992 and c_high <= c_sma)
         touched_sma_s = (c_high >= c_sma * 0.995)
         
+        # اصلاح شرط حجم پولبک شورت (کمتر یا مساوی میانگین)
         is_pullback_s = (
             (touched_floor or touched_sma_s)
             and (c_close < c_open)
             and (c_close <= c_sma) 
             and is_small_body 
-            and (c_vol >= c_avg_vol * PULLBACK_VOLUME_MULT)
+            and (c_vol <= c_avg_vol * PULLBACK_VOLUME_MULT)
         )
 
         if is_breakout_s or is_pullback_s:
