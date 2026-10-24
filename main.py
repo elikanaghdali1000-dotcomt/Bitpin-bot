@@ -11,7 +11,7 @@ import urllib3
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ================= تنظیمات اصلی =================
+# ================= تنظیمات اصلی و اطلاعات اختصاصی =================
 TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"
 TELEGRAM_CHAT_ID = "6643451227"
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
@@ -25,8 +25,8 @@ SL_PERCENT = 0.012
 TP1_PERCENT = 0.015
 TP2_PERCENT = 0.030
 MIN_BANDWIDTH = 0.01
-VOLUME_MULTIPLIER = 1.3
-PULLBACK_VOLUME_MULT = 1.0
+VOLUME_MULTIPLIER = 1.25
+PULLBACK_ZONE_FRACTION = 0.25
 
 MAJOR_SR_BARS = 60
 SR_SAFE_DISTANCE = 0.008
@@ -125,16 +125,27 @@ def get_ohlcv(symbol, resolution, count=100):
     df.dropna(inplace=True)
     return df
 
-def analyze_symbol(symbol):
+def get_btc_trend():
+    df_btc = get_ohlcv("BTC_IRT", TIMEFRAME_1H, count=40)
+    if df_btc is None or len(df_btc) < 25:
+        return "NEUTRAL"
+    
+    ema20 = df_btc['close'].ewm(span=20, adjust=False).mean().iloc[-2]
+    btc_close = df_btc['close'].iloc[-2]
+    
+    if btc_close > ema20:
+        return "BULLISH"
+    elif btc_close < ema20:
+        return "BEARISH"
+    return "NEUTRAL"
+
+def analyze_symbol(symbol, btc_trend):
     df_15m = get_ohlcv(symbol, TIMEFRAME_15M, count=50)
-    if df_15m is None or len(df_15m) < BB_PERIOD + 2:
+    if df_15m is None or len(df_15m) < BB_PERIOD + 3:
         return None, None
 
+    signal_idx = -2
     current_price = df_15m['close'].iloc[-1]
-
-    current_minute = datetime.now(timezone.utc).minute
-    if current_minute % 15 not in [11, 12, 13, 14, 0]:
-        return None, current_price
 
     df_15m['bb_middle'] = df_15m['close'].rolling(window=BB_PERIOD).mean()
     df_15m['bb_std'] = df_15m['close'].rolling(window=BB_PERIOD).std()
@@ -142,73 +153,86 @@ def analyze_symbol(symbol):
     df_15m['bb_lower'] = df_15m['bb_middle'] - (df_15m['bb_std'] * BB_STD)
     df_15m['volume_sma'] = df_15m['volume'].rolling(window=BB_PERIOD).mean()
 
-    c_bandwidth = (df_15m['bb_upper'].iloc[-1] - df_15m['bb_lower'].iloc[-1]) / df_15m['bb_middle'].iloc[-1]
-    if c_bandwidth < MIN_BANDWIDTH:
+    c_bandwidth = (df_15m['bb_upper'].iloc[signal_idx] - df_15m['bb_lower'].iloc[signal_idx]) / df_15m['bb_middle'].iloc[signal_idx]
+    if pd.isna(c_bandwidth) or c_bandwidth < MIN_BANDWIDTH:
         return None, current_price
 
     df_1h = get_ohlcv(symbol, TIMEFRAME_1H, count=70)
-    if df_1h is None or len(df_1h) < 25:
+    if df_1h is None or len(df_1h) < MAJOR_SR_BARS + 2:
         return None, current_price
 
     df_1h['ema20'] = df_1h['close'].ewm(span=20, adjust=False).mean()
-    h1_ema20 = df_1h['ema20'].iloc[-1]
+    h1_ema20 = df_1h['ema20'].iloc[-2]
 
-    c_close = df_15m['close'].iloc[-1]
-    c_open = df_15m['open'].iloc[-1]
-    c_high = df_15m['high'].iloc[-1]
-    c_low = df_15m['low'].iloc[-1]
-    c_volume = df_15m['volume'].iloc[-1]
-    avg_volume = df_15m['volume_sma'].iloc[-1]
-    c_bb_upper = df_15m['bb_upper'].iloc[-1]
-    c_bb_lower = df_15m['bb_lower'].iloc[-1]
-    c_bb_middle = df_15m['bb_middle'].iloc[-1]
+    c_close = df_15m['close'].iloc[signal_idx]
+    c_open = df_15m['open'].iloc[signal_idx]
+    c_high = df_15m['high'].iloc[signal_idx]
+    c_low = df_15m['low'].iloc[signal_idx]
+    c_volume = df_15m['volume'].iloc[signal_idx]
+    avg_volume = df_15m['volume_sma'].iloc[signal_idx]
+    c_bb_upper = df_15m['bb_upper'].iloc[signal_idx]
+    c_bb_lower = df_15m['bb_lower'].iloc[signal_idx]
+    c_bb_middle = df_15m['bb_middle'].iloc[signal_idx]
 
-    # سقف و کف از کندل‌های قبلی ۱ ساعته گرفته می‌شود (نه کندل در حال تشکیل)
-    past_h1 = df_1h.iloc[-MAJOR_SR_BARS:-1]
+    if any(pd.isna(v) for v in [avg_volume, c_bb_upper, c_bb_lower, c_bb_middle]):
+        return None, current_price
+
+    past_h1 = df_1h.iloc[-(MAJOR_SR_BARS + 1):-1]
     major_resistance = past_h1['high'].max()
     major_support = past_h1['low'].min()
 
-    recent_ranges = (df_15m['high'] - df_15m['low']).iloc[-6:-1]
+    # تشخیص اسپایک غیرعادی
+    recent_ranges = (df_15m['high'] - df_15m['low']).iloc[-7:-2]
     avg_candle_range = recent_ranges.mean() if len(recent_ranges) > 0 else 0
     current_range = c_high - c_low
-    is_spike_candle = avg_candle_range > 0 and current_range > (avg_candle_range * 3.0)
+    is_spike_candle = avg_candle_range > 0 and current_range > (avg_candle_range * 3.5)
 
-    # ------------------ LONG ------------------
+    # ------------------ سناریوی صعودی (LONG) ------------------
     long_h1_trend = c_close > h1_ema20
     long_breakout = (c_close > c_bb_upper) and (c_volume >= avg_volume * VOLUME_MULTIPLIER)
+
+    # پولبک ناحیه‌ای تطبیقی (حداکثر تا ۲۵٪ نیمه بالایی باند)
+    long_zone_lower = c_bb_middle - (c_bb_middle - c_bb_lower) * PULLBACK_ZONE_FRACTION
+    long_zone_upper = c_bb_middle + (c_bb_upper - c_bb_middle) * PULLBACK_ZONE_FRACTION
+
     long_pullback = (
-        (c_close >= c_bb_middle) and
-        (c_low <= c_bb_middle) and
-        (c_close > c_open) and
-        (c_volume <= avg_volume * PULLBACK_VOLUME_MULT) and
-        (abs(c_close - c_open) <= (c_bb_upper - c_bb_lower) * 0.35)
+        (long_zone_lower <= c_low <= long_zone_upper) and
+        (long_zone_lower <= c_close <= long_zone_upper) and
+        (c_close > c_bb_middle) and
+        (c_close > c_open)
     )
 
-    # برای لانگ: فاصله تا سقف ماژور منفی نباشد (یعنی در آستانه گیر کردن زیر سقف نباشیم)
     distance_to_res = (major_resistance - c_close) / c_close
     safe_from_resistance = not (0 < distance_to_res < SR_SAFE_DISTANCE)
 
-    if long_h1_trend and (long_breakout or long_pullback) and safe_from_resistance and not is_spike_candle:
-        return "LONG", c_close
+    btc_permits_long = (btc_trend != "BEARISH") or (symbol == "BTC_IRT")
+    if btc_permits_long and long_h1_trend and (long_breakout or long_pullback) and safe_from_resistance and not is_spike_candle:
+        entry_type = "شکست بولینگر (Breakout)" if long_breakout else "پولبک ناحیه میانی (Pullback Zone)"
+        return ("LONG", entry_type), current_price
 
-    # ------------------ SHORT ------------------
+    # ------------------ سناریوی نزولی (SHORT) ------------------
     short_h1_trend = c_close < h1_ema20
     short_breakout = (c_close < c_bb_lower) and (c_volume >= avg_volume * VOLUME_MULTIPLIER)
+
+    short_zone_lower = c_bb_middle - (c_bb_middle - c_bb_lower) * PULLBACK_ZONE_FRACTION
+    short_zone_upper = c_bb_middle + (c_bb_upper - c_bb_middle) * PULLBACK_ZONE_FRACTION
+
     short_pullback = (
-        (c_close <= c_bb_middle) and
-        (c_high >= c_bb_middle) and
-        (c_close < c_open) and
-        (c_volume <= avg_volume * PULLBACK_VOLUME_MULT) and
-        (abs(c_close - c_open) <= (c_bb_upper - c_bb_lower) * 0.35)
+        (short_zone_lower <= c_high <= short_zone_upper) and
+        (short_zone_lower <= c_close <= short_zone_upper) and
+        (c_close < c_bb_middle) and
+        (c_close < c_open)
     )
 
     distance_to_sup = (c_close - major_support) / c_close
     safe_from_support = not (0 < distance_to_sup < SR_SAFE_DISTANCE)
 
-    if short_h1_trend and (short_breakout or short_pullback) and safe_from_support and not is_spike_candle:
-        return "SHORT", c_close
+    btc_permits_short = (btc_trend != "BULLISH") or (symbol == "BTC_IRT")
+    if btc_permits_short and short_h1_trend and (short_breakout or short_pullback) and safe_from_support and not is_spike_candle:
+        entry_type = "شکست بولینگر (Breakout)" if short_breakout else "پولبک ناحیه میانی (Pullback Zone)"
+        return ("SHORT", entry_type), current_price
 
-    return None, c_close
+    return None, current_price
 
 def manage_open_positions(symbol, current_price):
     if symbol not in open_positions or current_price is None:
@@ -219,10 +243,14 @@ def manage_open_positions(symbol, current_price):
     entry = pos['entry']
     sl = pos['sl']
     tp1 = pos['tp1']
+    tp2 = pos.get('tp2')
 
     if p_type == "LONG":
         if current_price <= sl:
             send_telegram_message(f"🚨 <b>حد ضرر خورد (LONG)</b>\nنماد: {symbol}\nقیمت خروج: {current_price:,.0f} تومان")
+            del open_positions[symbol]
+        elif tp2 and current_price >= tp2:
+            send_telegram_message(f"✅ <b>تارگت دوم رسید (LONG)</b>\nنماد: {symbol}\nقیمت خروج: {current_price:,.0f} تومان")
             del open_positions[symbol]
         elif current_price >= tp1 and not pos['tp1_hit']:
             send_telegram_message(f"🎯 <b>تارگت اول رسید (LONG)</b>\nنماد: {symbol}\nسیو سود کنید و استاپ را روی نقطه ورود بگذارید.")
@@ -233,24 +261,31 @@ def manage_open_positions(symbol, current_price):
         if current_price >= sl:
             send_telegram_message(f"🚨 <b>حد ضرر خورد (SHORT)</b>\nنماد: {symbol}\nقیمت خروج: {current_price:,.0f} تومان")
             del open_positions[symbol]
+        elif tp2 and current_price <= tp2:
+            send_telegram_message(f"✅ <b>تارگت دوم رسید (SHORT)</b>\nنماد: {symbol}\nقیمت خروج: {current_price:,.0f} تومان")
+            del open_positions[symbol]
         elif current_price <= tp1 and not pos['tp1_hit']:
             send_telegram_message(f"🎯 <b>تارگت اول رسید (SHORT)</b>\nنماد: {symbol}\nسیو سود کنید و استاپ را روی نقطه ورود بگذارید.")
             pos['tp1_hit'] = True
             pos['sl'] = entry
 
 def bot_loop():
-    send_telegram_message("🤖 <b>ربات هوشمند معامله‌گر فعال شد.</b>\nدر حال پایش بازار با فیلترهای پیشرفته...")
+    send_telegram_message("🤖 <b>ربات هوشمند معامله‌گر فعال شد.</b>\nدر حال پایش بازار با فیلتر پولبک و لیدر بیت‌کوین...")
 
     while True:
         try:
+            btc_trend = get_btc_trend()
+
             for symbol in ALL_SYMBOLS:
-                signal, current_price = analyze_symbol(symbol)
+                sig_res, current_price = analyze_symbol(symbol, btc_trend)
 
                 if current_price:
                     manage_open_positions(symbol, current_price)
 
-                if signal and (symbol not in open_positions):
+                if sig_res and (symbol not in open_positions):
+                    signal, setup_name = sig_res
                     c_close = current_price
+
                     if signal == "LONG":
                         sl = c_close * (1 - SL_PERCENT)
                         tp1 = c_close * (1 + TP1_PERCENT)
@@ -259,12 +294,13 @@ def bot_loop():
                         msg = (
                             f"🟢 <b>سیگنال ورود: خرید (LONG)</b>\n\n"
                             f"🔹 <b>نماد:</b> {symbol}\n"
+                            f"📌 <b>الگو:</b> {setup_name}\n"
                             f"🔹 <b>قابلیت تعهدی:</b> {is_margin}\n"
                             f"💵 <b>نقطه ورود:</b> {c_close:,.0f} تومان\n"
                             f"🛑 <b>حد ضرر (SL):</b> {sl:,.0f} تومان\n"
                             f"🎯 <b>تارگت ۱ (TP1):</b> {tp1:,.0f} تومان\n"
                             f"🎯 <b>تارگت ۲ (TP2):</b> {tp2:,.0f} تومان\n\n"
-                            f"💡 <i>تایم‌فریم ۱۵ دقیقه همگام با روند ۱ ساعته</i>"
+                            f"💡 <i>تأیید هم‌راستایی با روند ۱ ساعته و بیت‌کوین</i>"
                         )
                     else:
                         if symbol not in MARGIN_SYMBOLS:
@@ -277,11 +313,12 @@ def bot_loop():
                         msg = (
                             f"🔴 <b>سیگنال ورود: فروش (SHORT)</b>\n\n"
                             f"🔹 <b>نماد:</b> {symbol} (معامله تعهدی)\n"
+                            f"📌 <b>الگو:</b> {setup_name}\n"
                             f"💵 <b>نقطه ورود:</b> {c_close:,.0f} تومان\n"
                             f"🛑 <b>حد ضرر (SL):</b> {sl:,.0f} تومان\n"
                             f"🎯 <b>تارگت ۱ (TP1):</b> {tp1:,.0f} تومان\n"
                             f"🎯 <b>تارگت ۲ (TP2):</b> {tp2:,.0f} تومان\n\n"
-                            f"💡 <i>تایم‌فریم ۱۵ دقیقه همگام با روند ۱ ساعته</i>"
+                            f"💡 <i>تأیید هم‌راستایی با روند ۱ ساعته و بیت‌کوین</i>"
                         )
 
                     open_positions[symbol] = {
@@ -289,6 +326,7 @@ def bot_loop():
                         'entry': c_close,
                         'sl': sl,
                         'tp1': tp1,
+                        'tp2': tp2,
                         'tp1_hit': False
                     }
                     send_telegram_message(msg)
