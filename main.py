@@ -22,7 +22,12 @@ MIN_BANDWIDTH = 0.008       # حداقل پهنای باند برای فیلتر
 VOLUME_MULTIPLIER = 1.35    # ضریب حجم بریک‌آوت استاندارد
 CHECK_INTERVAL = 30         # بررسی هر 30 ثانیه
 
-last_signals = {}           
+# تاخیر ایمن‌تر برای جلوگیری از بلاک شدن توسط بیت‌پین
+SYMBOL_SLEEP = 0.65         # مکث بین هر نماد (افزایش‌یافته برای امنیت بیشتر)
+REQUEST_TIMEOUT = 12        
+MAX_RETRIES = 3             
+
+last_signals = {}
 tp1_notified = {}
 sl_notified = {}
 last_processed_candle_time = {}
@@ -30,8 +35,8 @@ last_processed_candle_time = {}
 trend_cache = {}  # کش روند ۱ ساعته
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-    "Accept": "application/json"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*"
 }
 session = requests.Session()
 session.headers.update(HEADERS)
@@ -50,12 +55,11 @@ def format_number(val):
 
 def send_telegram_message(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram Token or Chat ID is missing!", flush=True)
         return False
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
         payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
-        res = session.post(url, data=payload, timeout=6)
+        res = session.post(url, data=payload, timeout=REQUEST_TIMEOUT)
         return res.status_code == 200
     except Exception as e:
         print(f"Telegram error: {e}", flush=True)
@@ -80,59 +84,78 @@ def keep_alive_ping():
     time.sleep(30)
     while True:
         try:
-            target_url = APP_URL
-            if target_url:
-                session.get(target_url, timeout=10)
+            if APP_URL:
+                session.get(APP_URL, timeout=10)
         except Exception:
             pass
         time.sleep(480)
 
+# ================= درخواست امن و ضد کرش =================
+
+def safe_get_json(url, label=""):
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            resp = session.get(url, timeout=REQUEST_TIMEOUT)
+            if resp.status_code == 200:
+                text_content = resp.text.strip()
+                if not text_content:
+                    return None
+                # بررسی اینکه آیا پاسخ واقعاً JSON است یا صفحه خطا (HTML)
+                if text_content.startswith("<"):
+                    print(f"[هشدار] دریافت صفحه HTML به جای JSON برای {label} (احتمال لیمیت سرعت)", flush=True)
+                    time.sleep(2.0 * (attempt + 1))
+                    continue
+                return resp.json()
+            elif resp.status_code in (429, 502, 503, 504):
+                wait = 2.0 * (attempt + 1)
+                print(f"[محدودیت بیت‌پین] کد {resp.status_code} برای {label}. انتظار {wait} ثانیه...", flush=True)
+                time.sleep(wait)
+            else:
+                time.sleep(1.0)
+        except Exception as e:
+            time.sleep(1.5)
+    return None
+
 # ================= تحلیل تکنیکال و فیلترها =================
 
 def get_market_trend(symbol):
-    """روند ۱ ساعته استاندارد و منعطف با کش ۳۰۰ ثانیه‌ای"""
     now = time.time()
     if symbol in trend_cache:
         cached_trend, cached_time = trend_cache[symbol]
         if now - cached_time < 300:
             return cached_trend
 
+    url = f"{API_URL}?symbol={symbol}&resolution=60&to={int(now)}&count=40"
+    data = safe_get_json(url, label=f"trend {symbol}")
+    if not data or 'result' not in data or len(data['result']) == 0:
+        return trend_cache.get(symbol, ("NEUTRAL", 0))[0]
+
     try:
-        url = f"{API_URL}?symbol={symbol}&resolution=60&to={int(now)}&count=40"
-        response = session.get(url, timeout=10)
-        data = response.json()
-        if 'result' in data and len(data['result']) > 0:
-            df_1h = pd.DataFrame(data['result'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            for col in ['open', 'high', 'low', 'close']:
-                df_1h[col] = df_1h[col].astype(float)
-            
-            closes = df_1h['close']
-            ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
-            current_p = closes.iloc[-1]
-            
-            # روند ۱ ساعته استاندارد: موقعیت قیمت نسبت به EMA 20
-            trend = "BULLISH" if current_p >= ema20 else "BEARISH"
-            
-            trend_cache[symbol] = (trend, now)
-            return trend
-        trend_cache[symbol] = ("NEUTRAL", now)
-        return "NEUTRAL"
+        df_1h = pd.DataFrame(data['result'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        for col in ['open', 'high', 'low', 'close']:
+            df_1h[col] = df_1h[col].astype(float)
+        closes = df_1h['close']
+        ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
+        current_p = closes.iloc[-1]
+        trend = "BULLISH" if current_p >= ema20 else "BEARISH"
+        trend_cache[symbol] = (trend, now)
+        return trend
     except Exception:
         return trend_cache.get(symbol, ("NEUTRAL", 0))[0]
 
 def fetch_candles(symbol, resolution="15", count=150):
+    url = f"{API_URL}?symbol={symbol}&resolution={resolution}&to={int(time.time())}&count={count}"
+    data = safe_get_json(url, label=f"candles {symbol}")
+    if not data or 'result' not in data or len(data['result']) == 0:
+        return None
+
     try:
-        url = f"{API_URL}?symbol={symbol}&resolution={resolution}&to={int(time.time())}&count={count}"
-        response = session.get(url, timeout=10)
-        data = response.json()
-        if 'result' in data and len(data['result']) > 0:
-            df = pd.DataFrame(data['result'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-            for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
-                df[col] = df[col].astype(float)
-            return df
-    except Exception as e:
-        print(f"خطا در دریافت کندل‌های {symbol}: {e}", flush=True)
-    return None
+        df = pd.DataFrame(data['result'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
+            df[col] = df[col].astype(float)
+        return df
+    except Exception:
+        return None
 
 def manage_open_positions(symbol, market_type, current_price):
     for base_key in [f"{symbol}_{market_type}_LONG", f"{symbol}_{market_type}_SHORT"]:
@@ -145,7 +168,6 @@ def manage_open_positions(symbol, market_type, current_price):
         sl_val = saved.get("sl")
         tp1 = saved["tp1"]
 
-        # مدیریت حد ضرر
         if not sl_notified.get(base_key, False) and sl_val:
             if (side == "LONG" and current_price <= sl_val) or (side == "SHORT" and current_price >= sl_val):
                 pnl = ((current_price - entry_p) / entry_p) * 100 if side == "LONG" else ((entry_p - current_price) / entry_p) * 100
@@ -160,7 +182,6 @@ def manage_open_positions(symbol, market_type, current_price):
                 last_signals.pop(base_key, None)
                 continue
 
-        # مدیریت تارگت اول و ریسک‌فری
         if not tp1_notified.get(base_key, False):
             if (side == "LONG" and current_price >= tp1 * 0.998) or (side == "SHORT" and current_price <= tp1 * 1.002):
                 pnl = ((current_price - entry_p) / entry_p) * 100 if side == "LONG" else ((entry_p - current_price) / entry_p) * 100
@@ -180,11 +201,8 @@ def analyze_and_signal(symbol, market_type):
         return
 
     current_price = df['close'].iloc[-1]
-    
-    # مدیریت پیوسته پوزیشن‌ها در تمام دقایق
     manage_open_positions(symbol, market_type, current_price)
 
-    # فیلتر دقایق پایانی کندل برای ورود معتبر
     current_minute = datetime.now(timezone.utc).minute
     if current_minute % 15 not in [11, 12, 13, 14, 0]:
         return
@@ -206,12 +224,8 @@ def analyze_and_signal(symbol, market_type):
     upper_band = sma + (std * 2.0)
     lower_band = sma - (std * 2.0)
     bandwidth = (upper_band - lower_band) / sma
-    
-    ema50 = closes.ewm(span=50, adjust=False).mean()
-    ema200 = closes.ewm(span=200, adjust=False).mean()
     avg_volume = volumes.rolling(window=20).mean()
 
-    # کندل جاری (i = -1)
     i = -1
     c_close = closes.iloc[i]
     c_open = df['open'].iloc[i]
@@ -224,12 +238,15 @@ def analyze_and_signal(symbol, market_type):
     c_bw = bandwidth.iloc[i]
     c_avg_vol = avg_volume.iloc[i]
 
+    if pd.isna(c_sma) or pd.isna(c_upper) or pd.isna(c_lower) or pd.isna(c_avg_vol):
+        return
+
     if c_bw < MIN_BANDWIDTH:
         return
 
     trend_1h = get_market_trend(symbol)
-    is_bullish = c_close >= sma.iloc[i]
-    is_bearish = c_close <= sma.iloc[i]
+    is_bullish = c_close >= c_sma
+    is_bearish = c_close <= c_sma
 
     c_body = abs(c_close - c_open)
     c_range = c_high - c_low
@@ -238,8 +255,6 @@ def analyze_and_signal(symbol, market_type):
     # سیگنال LONG
     if trend_1h == "BULLISH" and is_bullish:
         is_breakout = (c_close > c_upper) and (c_close > c_open) and (c_vol > c_avg_vol * VOLUME_MULTIPLIER)
-        
-        # بررسی سقف در ۳ کندل گذشته (تا فرآیند واقعی پولبک شکار شود)
         recent_break = highs.iloc[-4:-1].max() >= upper_band.iloc[-4:-1].min() * 0.998
         touched_roof = recent_break and (c_low <= c_upper * 1.006 and c_low >= c_sma)
         touched_sma = (c_low <= c_sma * 1.005)
@@ -267,20 +282,18 @@ def analyze_and_signal(symbol, market_type):
                 pattern = "بریک‌آوت صعودی 🚀" if is_breakout else "پولبک صعودی (تاییدشده با کندل کوچک و کم‌حجم) 📈"
                 msg = (
                     f"🟢 <b>سیگنال خرید (لانگ) - #{symbol}</b>\n"
-                    f"📌 بازار: {market_type} (دقیقه پایانی کندل)\n"
+                    f"📌 بازار: {market_type}\n"
                     f"💵 قیمت ورود: <code>{format_number(c_close)}</code>\n"
                     f"📊 الگو: {pattern}\n"
                     f"🎯 هدف ۱: <code>{format_number(tp1)}</code>\n"
                     f"🚀 هدف ۲: <code>{format_number(tp2)}</code>\n"
-                    f"🛑 حد ضرر اولیه: <code>{format_number(sl)}</code>"
+                    f"🛑 حد ضرر: <code>{format_number(sl)}</code>"
                 )
                 send_telegram_message(msg)
 
     # سیگنال SHORT
     if market_type == "MARGIN" and trend_1h == "BEARISH" and is_bearish:
         is_breakout_s = (c_close < c_lower) and (c_close < c_open) and (c_vol > c_avg_vol * VOLUME_MULTIPLIER)
-        
-        # بررسی کف در ۳ کندل گذشته
         recent_break_s = lows.iloc[-4:-1].min() <= lower_band.iloc[-4:-1].max() * 1.002
         touched_floor = recent_break_s and (c_high >= c_lower * 0.994 and c_high <= c_sma)
         touched_sma_s = (c_high >= c_sma * 0.995)
@@ -308,12 +321,12 @@ def analyze_and_signal(symbol, market_type):
                 pattern = "بریک‌آوت نزولی 🔻" if is_breakout_s else "پولبک نزولی (تاییدشده با کندل کوچک و کم‌حجم) 📉"
                 msg = (
                     f"🔴 <b>سیگنال فروش (شورت) - #{symbol}</b>\n"
-                    f"📌 بازار: تعهدی (دقیقه پایانی کندل)\n"
+                    f"📌 بازار: تعهدی\n"
                     f"💵 قیمت ورود: <code>{format_number(c_close)}</code>\n"
                     f"📊 الگو: {pattern}\n"
                     f"🎯 هدف ۱: <code>{format_number(tp1)}</code>\n"
                     f"🚀 هدف ۲: <code>{format_number(tp2)}</code>\n"
-                    f"🛑 حد ضرر اولیه: <code>{format_number(sl)}</code>"
+                    f"🛑 حد ضرر: <code>{format_number(sl)}</code>"
                 )
                 send_telegram_message(msg)
 
@@ -325,7 +338,7 @@ if __name__ == "__main__":
     startup_msg = (
         "📱 <b>اعلان راه‌اندازی ربات موبایل</b>\n\n"
         "🚀 ربات معامله‌گری بیت‌پین با موفقیت روی سرور آنلاین شد!\n"
-        "⚡️ استراتژی پولبک و بریک‌آوت استاندارد (بالانس‌شده) فعال گردید."
+        "⚡️ نسخه ضد لیمیت و پایدار فعال گردید."
     )
     send_telegram_message(startup_msg)
 
@@ -355,11 +368,11 @@ if __name__ == "__main__":
         try:
             for sym in spot_watchlist:
                 analyze_and_signal(sym, "SPOT")
-                time.sleep(0.1)
+                time.sleep(SYMBOL_SLEEP)  # مکث ایمن بین هر ارز
 
             for sym in margin_watchlist:
                 analyze_and_signal(sym, "MARGIN")
-                time.sleep(0.1)
+                time.sleep(SYMBOL_SLEEP)  # مکث ایمن بین هر ارز
 
             time.sleep(CHECK_INTERVAL)
         except Exception as e:
