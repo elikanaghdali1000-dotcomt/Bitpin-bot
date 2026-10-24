@@ -95,7 +95,7 @@ def keep_alive_ping():
 def safe_get_json(url, label=""):
     for attempt in range(MAX_RETRIES + 1):
         try:
-            resp = session.get(url, timeout=REQUEST_TIMEOUT)
+            resp = session.get(url, timeout=REQUEST_TIMEOUT, verify=False)
             if resp.status_code == 200:
                 text_content = resp.text.strip()
                 if not text_content:
@@ -119,7 +119,7 @@ def safe_get_json(url, label=""):
 
 def fetch_candles(symbol, resolution="15", count=150):
     now = int(time.time())
-    # محاسبه بازه زمانی بر اساس تعداد کندل و تایم‌فریم
+    # محاسبه بازه زمانی دقیق بر اساس تعداد کندل و تایم‌فریم
     step_sec = 900 if resolution == "15" else 3600
     from_time = now - (count * step_sec)
     res_str = "15m" if resolution == "15" else "1h"
@@ -127,20 +127,21 @@ def fetch_candles(symbol, resolution="15", count=150):
     url = f"{API_URL}?symbol={symbol}&from={from_time}&to={now}&res={res_str}"
     data = safe_get_json(url, label=f"candles {symbol}")
     
-    # بیت‌پین خروجی را مستقیماً به صورت لیست برمی‌گرداند
-    rows = data if isinstance(data, list) else (data or {}).get('result') or []
-    if not rows or len(rows) == 0:
+    if not data or not isinstance(data, list):
         return None
 
     try:
-        df = pd.DataFrame(rows)
-        # پشتیبانی از ستون‌های آرایه‌ای یا دیکشنری
-        if len(df.columns) >= 6:
-            df = df.iloc[:, :6]
-            df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
-        for col in df.columns:
+        df = pd.DataFrame(data)
+        # اطمینان از وجود ستون‌های کلیدی
+        required_cols = ['open', 'high', 'low', 'close', 'volume']
+        for col in required_cols:
+            if col not in df.columns:
+                return None
+                
+        for col in required_cols:
             df[col] = pd.to_numeric(df[col], errors='coerce')
-        return df.dropna().reset_index(drop=True)
+            
+        return df.dropna(subset=['close']).reset_index(drop=True)
     except Exception:
         return None
 
@@ -215,7 +216,7 @@ def analyze_and_signal(symbol, market_type):
         return current_price
 
     current_candle = df.iloc[-1]
-    candle_ts = current_candle['timestamp']
+    candle_ts = current_candle['timestamp'] if 'timestamp' in current_candle else 0
     state_key = f"{symbol}_{market_type}"
     
     if last_processed_candle_time.get(state_key) == candle_ts:
