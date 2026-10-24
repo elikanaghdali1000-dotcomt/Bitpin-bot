@@ -9,37 +9,33 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import urllib3
 
-# غیرفعال کردن هشدارهای SSL برای تمیزی لاگ‌ها
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-# ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"  # توکن تلگرام
-TELEGRAM_CHAT_ID = "6643451227"    # چت‌آیدی تلگرام
+# ================= تنظیمات اصلی =================
+TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"
+TELEGRAM_CHAT_ID = "6643451227"
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 API_URL = "https://api.bitpin.ir/v1/mkt/markets/"
 OHLC_URL = "https://api.bitpin.ir/v1/mkt/tv/history/"
 
-# تنظیمات استراتژی معاملاتی
 BB_PERIOD = 20
 BB_STD = 2.0
-SL_PERCENT = 0.012           # حد ضرر ۱.۲ درصد
-TP1_PERCENT = 0.015          # تارگت اول ۱.۵ درصد
-TP2_PERCENT = 0.030          # تارگت دوم ۳.۰ درصد
-MIN_BANDWIDTH = 0.01         # حداقل پهنای باند بولینگر (برای حذف بازار رنج و مرده)
-VOLUME_MULTIPLIER = 1.3      # حجم بریک‌اوت نسبت به میانگین
-PULLBACK_VOLUME_MULT = 1.0   # حجم پولبک (کم‌حجم و خشک نسبت به میانگین)
+SL_PERCENT = 0.012
+TP1_PERCENT = 0.015
+TP2_PERCENT = 0.030
+MIN_BANDWIDTH = 0.01
+VOLUME_MULTIPLIER = 1.3
+PULLBACK_VOLUME_MULT = 1.0
 
-# فیلتر سقف/کف ماژور و کندل‌های غیرعادی
-MAJOR_SR_BARS = 60           # بررسی ۶۰ کندل ۱ ساعته (حدود ۲.۵ روز گذشته)
-SR_SAFE_DISTANCE = 0.012     # حداقل ۱.۲ درصد فاصله امن تا سقف یا کف ماژور
+MAJOR_SR_BARS = 60
+SR_SAFE_DISTANCE = 0.008
 
 TIMEFRAME_15M = "15"
 TIMEFRAME_1H = "60"
-SCAN_INTERVAL = 30           # چک کردن دوره بازار هر ۳۰ ثانیه
-SYMBOL_SLEEP = 0.65          # تاخیر برای جلوگیری از مسدود شدن توسط سرور (Rate Limit)
+SCAN_INTERVAL = 30
+SYMBOL_SLEEP = 0.65
 
-# ================= لیست جفت‌ارزهای معتبر و فعال =================
 SPOT_SYMBOLS = [
     "BTC_IRT", "ETH_IRT", "USDT_IRT", "SOL_IRT", "XRP_IRT", "ADA_IRT", "DOGE_IRT",
     "SHIB_IRT", "AVAX_IRT", "LINK_IRT", "DOT_IRT", "TRX_IRT", "MATIC_IRT", "LTC_IRT",
@@ -64,7 +60,6 @@ MARGIN_SYMBOLS = [
 ALL_SYMBOLS = sorted(list(set(SPOT_SYMBOLS + MARGIN_SYMBOLS)))
 open_positions = {}
 
-# ================= وب‌سرور برای زنده ماندن روی Render =================
 class PingHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -89,7 +84,6 @@ def keep_alive_ping():
         except Exception:
             pass
 
-# ================= توابع ارسال پیام و ارتباط با صرافی =================
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}
@@ -121,43 +115,37 @@ def get_ohlcv(symbol, resolution, count=100):
     df = pd.DataFrame({
         'time': data['t'],
         'open': data['o'],
-        'high': data['h'],
-        'low': data['l'],
-        'close': data['c'],
-        'volume': data['v']
+        'high': data['high'] if 'high' in data else data['h'],
+        'low': data['low'] if 'low' in data else data['l'],
+        'close': data['close'] if 'close' in data else data['c'],
+        'volume': data['volume'] if 'volume' in data else data['v']
     })
     for col in ['open', 'high', 'low', 'close', 'volume']:
         df[col] = pd.to_numeric(df[col], errors='coerce')
     df.dropna(inplace=True)
     return df
 
-# ================= هسته تحلیلی و استراتژی =================
 def analyze_symbol(symbol):
-    # دریافت کندل‌های تایم‌فریم اصلی (۱۵ دقیقه)
     df_15m = get_ohlcv(symbol, TIMEFRAME_15M, count=50)
     if df_15m is None or len(df_15m) < BB_PERIOD + 2:
         return None, None
 
     current_price = df_15m['close'].iloc[-1]
 
-    # فقط در دقایق پایانی کندل ۱۵ دقیقه‌ای بررسی کن تا کندل تثبیت شده باشد
     current_minute = datetime.now(timezone.utc).minute
     if current_minute % 15 not in [11, 12, 13, 14, 0]:
         return None, current_price
 
-    # محاسبه بولینگر باند
     df_15m['bb_middle'] = df_15m['close'].rolling(window=BB_PERIOD).mean()
     df_15m['bb_std'] = df_15m['close'].rolling(window=BB_PERIOD).std()
     df_15m['bb_upper'] = df_15m['bb_middle'] + (df_15m['bb_std'] * BB_STD)
     df_15m['bb_lower'] = df_15m['bb_middle'] - (df_15m['bb_std'] * BB_STD)
     df_15m['volume_sma'] = df_15m['volume'].rolling(window=BB_PERIOD).mean()
 
-    # فیلتر بازار رنج با پهنای باند
     c_bandwidth = (df_15m['bb_upper'].iloc[-1] - df_15m['bb_lower'].iloc[-1]) / df_15m['bb_middle'].iloc[-1]
     if c_bandwidth < MIN_BANDWIDTH:
         return None, current_price
 
-    # دریافت ترند ۱ ساعته برای همگرایی با تایم‌فریم بالاتر
     df_1h = get_ohlcv(symbol, TIMEFRAME_1H, count=70)
     if df_1h is None or len(df_1h) < 25:
         return None, current_price
@@ -165,7 +153,6 @@ def analyze_symbol(symbol):
     df_1h['ema20'] = df_1h['close'].ewm(span=20, adjust=False).mean()
     h1_ema20 = df_1h['ema20'].iloc[-1]
 
-    # آخرین دیتای کندل جاری ۱۵ دقیقه
     c_close = df_15m['close'].iloc[-1]
     c_open = df_15m['open'].iloc[-1]
     c_high = df_15m['high'].iloc[-1]
@@ -176,18 +163,17 @@ def analyze_symbol(symbol):
     c_bb_lower = df_15m['bb_lower'].iloc[-1]
     c_bb_middle = df_15m['bb_middle'].iloc[-1]
 
-    # ------------------ محاسبه سقف و کف ماژور (از دیتای ۱ ساعته) ------------------
-    recent_h1 = df_1h.iloc[-MAJOR_SR_BARS:]
-    major_resistance = recent_h1['high'].max()  # سقف ماژور
-    major_support = recent_h1['low'].min()      # کف ماژور
+    # سقف و کف از کندل‌های قبلی ۱ ساعته گرفته می‌شود (نه کندل در حال تشکیل)
+    past_h1 = df_1h.iloc[-MAJOR_SR_BARS:-1]
+    major_resistance = past_h1['high'].max()
+    major_support = past_h1['low'].min()
 
-    # فیلتر کندل شارپی و پامپ غیرعادی (نسبت به میانگین دامنه ۵ کندل اخیر)
     recent_ranges = (df_15m['high'] - df_15m['low']).iloc[-6:-1]
     avg_candle_range = recent_ranges.mean() if len(recent_ranges) > 0 else 0
     current_range = c_high - c_low
-    is_spike_candle = avg_candle_range > 0 and current_range > (avg_candle_range * 2.8)
+    is_spike_candle = avg_candle_range > 0 and current_range > (avg_candle_range * 3.0)
 
-    # ------------------ شرایط ورود LONG ------------------
+    # ------------------ LONG ------------------
     long_h1_trend = c_close > h1_ema20
     long_breakout = (c_close > c_bb_upper) and (c_volume >= avg_volume * VOLUME_MULTIPLIER)
     long_pullback = (
@@ -198,14 +184,14 @@ def analyze_symbol(symbol):
         (abs(c_close - c_open) <= (c_bb_upper - c_bb_lower) * 0.35)
     )
 
-    # شرط ایمنی: نباید نزدیک سقف ماژور باشیم و کندل نباید پامپ شارپی باشه
+    # برای لانگ: فاصله تا سقف ماژور منفی نباشد (یعنی در آستانه گیر کردن زیر سقف نباشیم)
     distance_to_res = (major_resistance - c_close) / c_close
-    safe_from_resistance = distance_to_res > SR_SAFE_DISTANCE
+    safe_from_resistance = not (0 < distance_to_res < SR_SAFE_DISTANCE)
 
     if long_h1_trend and (long_breakout or long_pullback) and safe_from_resistance and not is_spike_candle:
         return "LONG", c_close
 
-    # ------------------ شرایط ورود SHORT ------------------
+    # ------------------ SHORT ------------------
     short_h1_trend = c_close < h1_ema20
     short_breakout = (c_close < c_bb_lower) and (c_volume >= avg_volume * VOLUME_MULTIPLIER)
     short_pullback = (
@@ -216,16 +202,14 @@ def analyze_symbol(symbol):
         (abs(c_close - c_open) <= (c_bb_upper - c_bb_lower) * 0.35)
     )
 
-    # شرط ایمنی: نباید نزدیک کف ماژور باشیم و کندل نباید دامپ شارپی باشه
     distance_to_sup = (c_close - major_support) / c_close
-    safe_from_support = distance_to_sup > SR_SAFE_DISTANCE
+    safe_from_support = not (0 < distance_to_sup < SR_SAFE_DISTANCE)
 
     if short_h1_trend and (short_breakout or short_pullback) and safe_from_support and not is_spike_candle:
         return "SHORT", c_close
 
     return None, c_close
 
-# ================= مدیریت پوزیشن‌های باز =================
 def manage_open_positions(symbol, current_price):
     if symbol not in open_positions or current_price is None:
         return
@@ -254,7 +238,6 @@ def manage_open_positions(symbol, current_price):
             pos['tp1_hit'] = True
             pos['sl'] = entry
 
-# ================= حلقه اصلی ربات =================
 def bot_loop():
     send_telegram_message("🤖 <b>ربات هوشمند معامله‌گر فعال شد.</b>\nدر حال پایش بازار با فیلترهای پیشرفته...")
 
@@ -317,7 +300,6 @@ def bot_loop():
 
         time.sleep(SCAN_INTERVAL)
 
-# ================= اجرای برنامه =================
 if __name__ == "__main__":
     t_http = threading.Thread(target=run_http_server, daemon=True)
     t_http.start()
