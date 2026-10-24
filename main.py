@@ -6,6 +6,10 @@ import numpy as np
 import threading
 from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
+import urllib3
+
+# غیرفعال کردن هشدارهای SSL برای تمیزی لاگ‌ها
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
 TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"  # توکن تلگرام
@@ -18,7 +22,7 @@ PERIOD = 20                 # دوره بولینگر
 SL_PERCENT = 0.012          # حد ضرر: 1.2 درصد
 TP1_PERCENT = 0.015         # حد سود اول: 1.5 درصد
 TP2_PERCENT = 0.030         # حد سود دوم: 3 درصد
-MIN_BANDWIDTH = 0.008       # حداقل پهنای باند برای فیلتر رنج
+MIN_BANDWIDTH = 0.01        # حداقل پهنای باند برای فیلتر بازارهای رنج
 VOLUME_MULTIPLIER = 1.35    # ضریب حجم بریک‌آوت استاندارد
 CHECK_INTERVAL = 30         # بررسی هر 30 ثانیه
 
@@ -115,11 +119,10 @@ def safe_get_json(url, label=""):
             time.sleep(1.5)
     return None
 
-# ================= تحلیل تکنیکال و فیلترها (اصلاح‌شده بر اساس اندپوینت جدید) =================
+# ================= تحلیل تکنیکال و فیلترها =================
 
 def fetch_candles(symbol, resolution="15", count=150):
     now = int(time.time())
-    # محاسبه بازه زمانی دقیق بر اساس تعداد کندل و تایم‌فریم
     step_sec = 900 if resolution == "15" else 3600
     from_time = now - (count * step_sec)
     res_str = "15m" if resolution == "15" else "1h"
@@ -132,7 +135,6 @@ def fetch_candles(symbol, resolution="15", count=150):
 
     try:
         df = pd.DataFrame(data)
-        # اطمینان از وجود ستون‌های کلیدی
         required_cols = ['open', 'high', 'low', 'close', 'volume']
         for col in required_cols:
             if col not in df.columns:
@@ -165,7 +167,7 @@ def get_market_trend(symbol):
     except Exception:
         return trend_cache.get(symbol, ("NEUTRAL", 0))[0]
 
-def manage_open_positions(symbol, market_type, current_price):
+def manage_open_positions(symbol, market_type, current_candle_high, current_candle_low, current_price):
     for base_key in [f"{symbol}_{market_type}_LONG", f"{symbol}_{market_type}_SHORT"]:
         saved = last_signals.get(base_key)
         if not saved:
@@ -176,13 +178,15 @@ def manage_open_positions(symbol, market_type, current_price):
         sl_val = saved.get("sl")
         tp1 = saved["tp1"]
 
+        # بررسی حد ضرر با استفاده از بالاترین/پایین‌ترین قیمت کندل (جلوگیری از جا ماندن از Wickها)
         if not sl_notified.get(base_key, False) and sl_val:
-            if (side == "LONG" and current_price <= sl_val) or (side == "SHORT" and current_price >= sl_val):
-                pnl = ((current_price - entry_p) / entry_p) * 100 if side == "LONG" else ((entry_p - current_price) / entry_p) * 100
+            hit_sl = (side == "LONG" and current_candle_low <= sl_val) or (side == "SHORT" and current_candle_high >= sl_val)
+            if hit_sl:
+                pnl = ((sl_val - entry_p) / entry_p) * 100 if side == "LONG" else ((entry_p - sl_val) / entry_p) * 100
                 msg = (
                     f"🛑 <b>هشدار حد ضرر (Stop Loss) - #{symbol}</b>\n"
                     f"📌 بازار: {market_type} ({side})\n"
-                    f"💵 قیمت خروج: <code>{format_number(current_price)}</code>\n"
+                    f"💵 قیمت حد ضرر: <code>{format_number(sl_val)}</code>\n"
                     f"📉 میزان زیان: <code>{pnl:.2f}% ❌</code>"
                 )
                 send_telegram_message(msg)
@@ -190,9 +194,11 @@ def manage_open_positions(symbol, market_type, current_price):
                 last_signals.pop(base_key, None)
                 continue
 
+        # بررسی تارگت اول با استفاده از High/Low کندل
         if not tp1_notified.get(base_key, False):
-            if (side == "LONG" and current_price >= tp1 * 0.998) or (side == "SHORT" and current_price <= tp1 * 1.002):
-                pnl = ((current_price - entry_p) / entry_p) * 100 if side == "LONG" else ((entry_p - current_price) / entry_p) * 100
+            hit_tp1 = (side == "LONG" and current_candle_high >= tp1 * 0.998) or (side == "SHORT" and current_candle_low <= tp1 * 1.002)
+            if hit_tp1:
+                pnl = ((tp1 - entry_p) / entry_p) * 100 if side == "LONG" else ((entry_p - tp1) / entry_p) * 100
                 msg = (
                     f"🎯 <b>تارگت اول لمس شد! (#{symbol})</b>\n"
                     f"📌 بازار: {market_type} ({side})\n"
@@ -209,7 +215,11 @@ def analyze_and_signal(symbol, market_type):
         return None
 
     current_price = df['close'].iloc[-1]
-    manage_open_positions(symbol, market_type, current_price)
+    c_high = df['high'].iloc[-1]
+    c_low = df['low'].iloc[-1]
+
+    # مدیریت موقعیت‌های باز با استفاده از High و Low کندل جاری
+    manage_open_positions(symbol, market_type, c_high, c_low, current_price)
 
     current_minute = datetime.now(timezone.utc).minute
     if current_minute % 15 not in [11, 12, 13, 14, 0]:
@@ -237,8 +247,6 @@ def analyze_and_signal(symbol, market_type):
     i = -1
     c_close = closes.iloc[i]
     c_open = df['open'].iloc[i]
-    c_high = highs.iloc[i]
-    c_low = lows.iloc[i]
     c_vol = volumes.iloc[i]
     c_sma = sma.iloc[i]
     c_upper = upper_band.iloc[i]
@@ -263,14 +271,15 @@ def analyze_and_signal(symbol, market_type):
     # سیگنال LONG
     if trend_1h == "BULLISH" and is_bullish:
         is_breakout = (c_close > c_upper) and (c_close > c_open) and (c_vol > c_avg_vol * VOLUME_MULTIPLIER)
-        recent_break = highs.iloc[-4:-1].max() >= upper_band.iloc[-4:-1].min() * 0.998
-        touched_roof = recent_break and (c_low <= c_upper * 1.006 and c_low >= c_sma)
+        
+        recent_break = highs.iloc[-4:-1].max() >= upper_band.iloc[-4:-1].max() * 0.998
+        touched_roof = recent_break and (c_low <= c_upper * 1.008 and c_low >= c_sma)
         touched_sma = (c_low <= c_sma * 1.005)
         
         is_pullback = (
             (touched_roof or touched_sma)
+            and (c_close > c_open)
             and (c_close >= c_sma) 
-            and (c_close >= c_open) 
             and is_small_body 
             and (c_vol <= c_avg_vol * 1.15)
         )
@@ -287,7 +296,7 @@ def analyze_and_signal(symbol, market_type):
                 tp1_notified[base_key] = False
                 sl_notified[base_key] = False
 
-                pattern = "بریک‌آوت صعودی 🚀" if is_breakout else "پولبک صعودی (تاییدشده با کندل کوچک و کم‌حجم) 📈"
+                pattern = "بریک‌آوت صعودی 🚀" if is_breakout else "پولبک صعودی (تاییدشده) 📈"
                 msg = (
                     f"🟢 <b>سیگنال خرید (لانگ) - #{symbol}</b>\n"
                     f"📌 بازار: {market_type}\n"
@@ -302,14 +311,15 @@ def analyze_and_signal(symbol, market_type):
     # سیگنال SHORT
     if market_type == "MARGIN" and trend_1h == "BEARISH" and is_bearish:
         is_breakout_s = (c_close < c_lower) and (c_close < c_open) and (c_vol > c_avg_vol * VOLUME_MULTIPLIER)
-        recent_break_s = lows.iloc[-4:-1].min() <= lower_band.iloc[-4:-1].max() * 1.002
-        touched_floor = recent_break_s and (c_high >= c_lower * 0.994 and c_high <= c_sma)
+        
+        recent_break_s = lows.iloc[-4:-1].min() <= lower_band.iloc[-4:-1].min() * 1.002
+        touched_floor = recent_break_s and (c_high >= c_lower * 0.992 and c_high <= c_sma)
         touched_sma_s = (c_high >= c_sma * 0.995)
         
         is_pullback_s = (
             (touched_floor or touched_sma_s)
+            and (c_close < c_open)
             and (c_close <= c_sma) 
-            and (c_close <= c_open) 
             and is_small_body 
             and (c_vol <= c_avg_vol * 1.15)
         )
@@ -326,7 +336,7 @@ def analyze_and_signal(symbol, market_type):
                 tp1_notified[base_key] = False
                 sl_notified[base_key] = False
 
-                pattern = "بریک‌آوت نزولی 🔻" if is_breakout_s else "پولبک نزولی (تاییدشده با کندل کوچک و کم‌حجم) 📉"
+                pattern = "بریک‌آوت نزولی 🔻" if is_breakout_s else "پولبک نزولی (تاییدشده) 📉"
                 msg = (
                     f"🔴 <b>سیگنال فروش (شورت) - #{symbol}</b>\n"
                     f"📌 بازار: تعهدی\n"
@@ -348,7 +358,7 @@ if __name__ == "__main__":
     startup_msg = (
         "📱 <b>اعلان راه‌اندازی ربات موبایل</b>\n\n"
         "🚀 ربات معامله‌گری بیت‌پین با موفقیت روی سرور آنلاین شد!\n"
-        "⚡️ نسخه ضد لیمیت و پایدار فعال گردید."
+        "⚡️ نسخه نهایی مجهز به رصد دقیق Wickهای حد ضرر و تارگت فعال گردید."
     )
     send_telegram_message(startup_msg)
 
