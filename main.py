@@ -115,7 +115,34 @@ def safe_get_json(url, label=""):
             time.sleep(1.5)
     return None
 
-# ================= تحلیل تکنیکال و فیلترها =================
+# ================= تحلیل تکنیکال و فیلترها (اصلاح‌شده بر اساس اندپوینت جدید) =================
+
+def fetch_candles(symbol, resolution="15", count=150):
+    now = int(time.time())
+    # محاسبه بازه زمانی بر اساس تعداد کندل و تایم‌فریم
+    step_sec = 900 if resolution == "15" else 3600
+    from_time = now - (count * step_sec)
+    res_str = "15m" if resolution == "15" else "1h"
+    
+    url = f"{API_URL}?symbol={symbol}&from={from_time}&to={now}&res={res_str}"
+    data = safe_get_json(url, label=f"candles {symbol}")
+    
+    # بیت‌پین خروجی را مستقیماً به صورت لیست برمی‌گرداند
+    rows = data if isinstance(data, list) else (data or {}).get('result') or []
+    if not rows or len(rows) == 0:
+        return None
+
+    try:
+        df = pd.DataFrame(rows)
+        # پشتیبانی از ستون‌های آرایه‌ای یا دیکشنری
+        if len(df.columns) >= 6:
+            df = df.iloc[:, :6]
+            df.columns = ['timestamp', 'open', 'high', 'low', 'close', 'volume']
+        for col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        return df.dropna().reset_index(drop=True)
+    except Exception:
+        return None
 
 def get_market_trend(symbol):
     now = time.time()
@@ -124,15 +151,11 @@ def get_market_trend(symbol):
         if now - cached_time < 300:
             return cached_trend
 
-    url = f"{API_URL}?symbol={symbol}&resolution=60&to={int(now)}&count=40"
-    data = safe_get_json(url, label=f"trend {symbol}")
-    if not data or 'result' not in data or len(data['result']) == 0:
+    df_1h = fetch_candles(symbol, resolution="60", count=40)
+    if df_1h is None or len(df_1h) < 20:
         return trend_cache.get(symbol, ("NEUTRAL", 0))[0]
 
     try:
-        df_1h = pd.DataFrame(data['result'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        for col in ['open', 'high', 'low', 'close']:
-            df_1h[col] = df_1h[col].astype(float)
         closes = df_1h['close']
         ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
         trend = "BULLISH" if closes.iloc[-1] >= ema20 else "BEARISH"
@@ -140,20 +163,6 @@ def get_market_trend(symbol):
         return trend
     except Exception:
         return trend_cache.get(symbol, ("NEUTRAL", 0))[0]
-
-def fetch_candles(symbol, resolution="15", count=150):
-    url = f"{API_URL}?symbol={symbol}&resolution={resolution}&to={int(time.time())}&count={count}"
-    data = safe_get_json(url, label=f"candles {symbol}")
-    if not data or 'result' not in data or len(data['result']) == 0:
-        return None
-
-    try:
-        df = pd.DataFrame(data['result'], columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-        for col in ['timestamp', 'open', 'high', 'low', 'close', 'volume']:
-            df[col] = df[col].astype(float)
-        return df
-    except Exception:
-        return None
 
 def manage_open_positions(symbol, market_type, current_price):
     for base_key in [f"{symbol}_{market_type}_LONG", f"{symbol}_{market_type}_SHORT"]:
@@ -383,7 +392,6 @@ if __name__ == "__main__":
                     successful_scans += 1
                 time.sleep(SYMBOL_SLEEP)
 
-            # گزارش زنده در لاگ: نمایش قیمت زنده بیت‌کوین و تعداد ارزهای اسکن‌شده
             now_str = datetime.now().strftime("%H:%M:%S")
             btc_display = f"${last_btc_price:,.2f}" if last_btc_price else "دریافت نشد"
             print(f"[{now_str}] دور اسکن کامل شد | دریافت داده {successful_scans} نماد | قیمت بیت‌کوین: {btc_display}", flush=True)
