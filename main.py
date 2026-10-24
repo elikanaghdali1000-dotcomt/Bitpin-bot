@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import os
 import time
 import requests
@@ -23,7 +24,8 @@ SL_PERCENT = 0.012          # حد ضرر: 1.2 درصد
 TP1_PERCENT = 0.015         # حد سود اول: 1.5 درصد
 TP2_PERCENT = 0.030         # حد سود دوم: 3 درصد
 MIN_BANDWIDTH = 0.01        # حداقل پهنای باند برای فیلتر بازارهای رنج
-VOLUME_MULTIPLIER = 1.35    # ضریب حجم بریک‌آوت استاندارد
+VOLUME_MULTIPLIER = 1.3     # ضریب حجم بریک‌آوت (بالای 1.3 برابر میانگین)
+PULLBACK_VOLUME_MULT = 1.8  # ضریب حجم پولبک / حالت رنج (بالای 1.8 برابر میانگین)
 CHECK_INTERVAL = 30         # بررسی هر 30 ثانیه
 
 # تاخیر ایمن برای جلوگیری از بلاک شدن توسط بیت‌پین
@@ -281,7 +283,7 @@ def analyze_and_signal(symbol, market_type):
             and (c_close > c_open)
             and (c_close >= c_sma) 
             and is_small_body 
-            and (c_vol <= c_avg_vol * 1.15)
+            and (c_vol >= c_avg_vol * PULLBACK_VOLUME_MULT)
         )
 
         if is_breakout or is_pullback:
@@ -321,7 +323,7 @@ def analyze_and_signal(symbol, market_type):
             and (c_close < c_open)
             and (c_close <= c_sma) 
             and is_small_body 
-            and (c_vol <= c_avg_vol * 1.15)
+            and (c_vol >= c_avg_vol * PULLBACK_VOLUME_MULT)
         )
 
         if is_breakout_s or is_pullback_s:
