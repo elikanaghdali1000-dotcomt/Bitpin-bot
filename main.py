@@ -22,8 +22,8 @@ MIN_BANDWIDTH = 0.008       # حداقل پهنای باند برای فیلتر
 VOLUME_MULTIPLIER = 1.35    # ضریب حجم بریک‌آوت استاندارد
 CHECK_INTERVAL = 30         # بررسی هر 30 ثانیه
 
-# تاخیر ایمن‌تر برای جلوگیری از بلاک شدن توسط بیت‌پین
-SYMBOL_SLEEP = 0.65         # مکث بین هر نماد (افزایش‌یافته برای امنیت بیشتر)
+# تاخیر ایمن برای جلوگیری از بلاک شدن توسط بیت‌پین
+SYMBOL_SLEEP = 0.65         
 REQUEST_TIMEOUT = 12        
 MAX_RETRIES = 3             
 
@@ -100,7 +100,6 @@ def safe_get_json(url, label=""):
                 text_content = resp.text.strip()
                 if not text_content:
                     return None
-                # بررسی اینکه آیا پاسخ واقعاً JSON است یا صفحه خطا (HTML)
                 if text_content.startswith("<"):
                     print(f"[هشدار] دریافت صفحه HTML به جای JSON برای {label} (احتمال لیمیت سرعت)", flush=True)
                     time.sleep(2.0 * (attempt + 1))
@@ -136,8 +135,7 @@ def get_market_trend(symbol):
             df_1h[col] = df_1h[col].astype(float)
         closes = df_1h['close']
         ema20 = closes.ewm(span=20, adjust=False).mean().iloc[-1]
-        current_p = closes.iloc[-1]
-        trend = "BULLISH" if current_p >= ema20 else "BEARISH"
+        trend = "BULLISH" if closes.iloc[-1] >= ema20 else "BEARISH"
         trend_cache[symbol] = (trend, now)
         return trend
     except Exception:
@@ -198,21 +196,21 @@ def manage_open_positions(symbol, market_type, current_price):
 def analyze_and_signal(symbol, market_type):
     df = fetch_candles(symbol, RESOLUTION, count=150)
     if df is None or len(df) < PERIOD + 10:
-        return
+        return None
 
     current_price = df['close'].iloc[-1]
     manage_open_positions(symbol, market_type, current_price)
 
     current_minute = datetime.now(timezone.utc).minute
     if current_minute % 15 not in [11, 12, 13, 14, 0]:
-        return
+        return current_price
 
     current_candle = df.iloc[-1]
     candle_ts = current_candle['timestamp']
     state_key = f"{symbol}_{market_type}"
     
     if last_processed_candle_time.get(state_key) == candle_ts:
-        return
+        return current_price
 
     closes = df['close']
     highs = df['high']
@@ -239,10 +237,10 @@ def analyze_and_signal(symbol, market_type):
     c_avg_vol = avg_volume.iloc[i]
 
     if pd.isna(c_sma) or pd.isna(c_upper) or pd.isna(c_lower) or pd.isna(c_avg_vol):
-        return
+        return current_price
 
     if c_bw < MIN_BANDWIDTH:
-        return
+        return current_price
 
     trend_1h = get_market_trend(symbol)
     is_bullish = c_close >= c_sma
@@ -330,6 +328,8 @@ def analyze_and_signal(symbol, market_type):
                 )
                 send_telegram_message(msg)
 
+    return current_price
+
 # ================= حلقه اصلی =================
 if __name__ == "__main__":
     threading.Thread(target=run_server, daemon=True).start()
@@ -366,13 +366,27 @@ if __name__ == "__main__":
 
     while True:
         try:
+            last_btc_price = None
+            successful_scans = 0
+
             for sym in spot_watchlist:
-                analyze_and_signal(sym, "SPOT")
-                time.sleep(SYMBOL_SLEEP)  # مکث ایمن بین هر ارز
+                p = analyze_and_signal(sym, "SPOT")
+                if p is not None:
+                    successful_scans += 1
+                    if sym == "BTC_USDT":
+                        last_btc_price = p
+                time.sleep(SYMBOL_SLEEP)
 
             for sym in margin_watchlist:
-                analyze_and_signal(sym, "MARGIN")
-                time.sleep(SYMBOL_SLEEP)  # مکث ایمن بین هر ارز
+                p = analyze_and_signal(sym, "MARGIN")
+                if p is not None:
+                    successful_scans += 1
+                time.sleep(SYMBOL_SLEEP)
+
+            # گزارش زنده در لاگ: نمایش قیمت زنده بیت‌کوین و تعداد ارزهای اسکن‌شده
+            now_str = datetime.now().strftime("%H:%M:%S")
+            btc_display = f"${last_btc_price:,.2f}" if last_btc_price else "دریافت نشد"
+            print(f"[{now_str}] دور اسکن کامل شد | دریافت داده {successful_scans} نماد | قیمت بیت‌کوین: {btc_display}", flush=True)
 
             time.sleep(CHECK_INTERVAL)
         except Exception as e:
