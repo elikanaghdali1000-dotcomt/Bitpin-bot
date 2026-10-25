@@ -41,31 +41,31 @@ TIMEFRAME_1H = "60"
 SCAN_INTERVAL = 30
 SYMBOL_SLEEP = 0.65
 
+# جفت‌ارزهای بازار تتری (USDT)
 SPOT_SYMBOLS = [
-    "BTC_IRT", "ETH_IRT", "USDT_IRT", "SOL_IRT", "XRP_IRT", "ADA_IRT", "DOGE_IRT",
-    "SHIB_IRT", "AVAX_IRT", "LINK_IRT", "DOT_IRT", "TRX_IRT", "MATIC_IRT", "LTC_IRT",
-    "BCH_IRT", "NEAR_IRT", "UNI_IRT", "ICP_IRT", "APT_IRT", "FIL_IRT", "ATOM_IRT",
-    "ARB_IRT", "OP_IRT", "XLM_IRT", "ETC_IRT", "HBAR_IRT", "INJ_IRT", "SUI_IRT",
-    "RNDR_IRT", "TIA_IRT", "GRT_IRT", "ALGO_IRT", "FTM_IRT", "SAND_IRT", "MANA_IRT",
-    "AXS_IRT", "THETA_IRT", "EGLD_IRT", "FLOW_IRT", "AAVE_IRT", "EOS_IRT", "KAVA_IRT",
-    "GALA_IRT", "CHZ_IRT", "CRV_IRT", "MKR_IRT", "SNX_IRT", "RUNE_IRT", "DYDX_IRT",
-    "BLUR_IRT", "WOO_IRT", "LDO_IRT", "APE_IRT", "QNT_IRT", "FET_IRT", "AGIX_IRT",
-    "OCEAN_IRT", "ROSE_IRT", "ZIL_IRT", "ENJ_IRT", "1INCH_IRT", "COMP_IRT", "BAT_IRT",
-    "LRC_IRT", "TWT_IRT", "MASK_IRT", "HOT_IRT", "JASMY_IRT", "PEPE_IRT", "FLOKI_IRT",
-    "BONK_IRT", "WIF_IRT", "NOT_IRT", "TON_IRT", "KAS_IRT", "PENDLE_IRT"
+    "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "ADA_USDT", "DOGE_USDT",
+    "SHIB_USDT", "AVAX_USDT", "LINK_USDT", "DOT_USDT", "TRX_USDT", "MATIC_USDT", "LTC_USDT",
+    "BCH_USDT", "NEAR_USDT", "UNI_USDT", "ICP_USDT", "APT_USDT", "FIL_USDT", "ATOM_USDT",
+    "ARB_USDT", "OP_USDT", "XLM_USDT", "ETC_USDT", "HBAR_USDT", "INJ_USDT", "SUI_USDT",
+    "RNDR_USDT", "TIA_USDT", "GRT_USDT", "ALGO_USDT", "FTM_USDT", "SAND_USDT", "MANA_USDT",
+    "AXS_USDT", "THETA_USDT", "EGLD_USDT", "FLOW_USDT", "AAVE_USDT", "EOS_USDT", "KAVA_USDT",
+    "GALA_USDT", "CHZ_USDT", "CRV_USDT", "MKR_USDT", "SNX_USDT", "RUNE_USDT", "DYDX_USDT",
+    "BLUR_USDT", "WOO_USDT", "LDO_USDT", "APE_USDT", "QNT_USDT", "FET_USDT", "AGIX_USDT",
+    "OCEAN_USDT", "ROSE_USDT", "ZIL_USDT", "ENJ_USDT", "1INCH_USDT", "COMP_USDT", "BAT_USDT",
+    "LRC_USDT", "TWT_USDT", "MASK_USDT", "HOT_USDT", "JASMY_USDT", "PEPE_USDT", "FLOKI_USDT",
+    "BONK_USDT", "WIF_USDT", "NOT_USDT", "TON_USDT", "KAS_USDT", "PENDLE_USDT"
 ]
 
 MARGIN_SYMBOLS = [
-    "BTC_IRT", "ETH_IRT", "USDT_IRT", "SOL_IRT", "XRP_IRT", "ADA_IRT", "DOGE_IRT",
-    "SHIB_IRT", "AVAX_IRT", "LINK_IRT", "DOT_IRT", "TRX_IRT", "MATIC_IRT", "LTC_IRT",
-    "BCH_IRT", "NEAR_IRT", "UNI_IRT", "ICP_IRT", "APT_IRT", "ARB_IRT", "OP_IRT",
-    "TON_IRT", "NOT_IRT", "PEPE_IRT", "SUI_IRT", "FET_IRT", "WIF_IRT"
+    "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "ADA_USDT", "DOGE_USDT",
+    "SHIB_USDT", "AVAX_USDT", "LINK_USDT", "DOT_USDT", "TRX_USDT", "MATIC_USDT", "LTC_USDT",
+    "BCH_USDT", "NEAR_USDT", "UNI_USDT", "ICP_USDT", "APT_USDT", "ARB_USDT", "OP_USDT",
+    "TON_USDT", "NOT_USDT", "PEPE_USDT", "SUI_USDT", "FET_USDT", "WIF_USDT"
 ]
 
 ALL_SYMBOLS = sorted(list(set(SPOT_SYMBOLS + MARGIN_SYMBOLS)))
 open_positions = {}
 
-# کش محلی thread-safe برای جلوگیری از خطای ۴۲۹ و افت سرعت در رندر
 ohlcv_cache = {}
 cache_lock = threading.Lock()
 
@@ -130,7 +130,7 @@ def safe_get_json(url, params=None, retries=3):
     return None
 
 def get_ohlcv(symbol, resolution, count=100):
-    cache_ttl = 60 if resolution == TIMEFRAME_1H else 20
+    cache_ttl = 60 if str(resolution) in ("60", "1H") else 20
     now_ts = time.time()
     cache_key = f"{symbol}_{resolution}"
 
@@ -141,13 +141,12 @@ def get_ohlcv(symbol, resolution, count=100):
                 return cached_df.copy()
 
     to_time = int(now_ts)
-    res_minutes = int(resolution)
-    # بازه زمانی مطمئن و استاندارد UTC
-    from_time = to_time - (count * res_minutes * 60 * 3)
+    res_minutes = 60 if str(resolution) in ("60", "1H") else int(resolution)
+    from_time = to_time - (count * res_minutes * 60)
 
     params = {
         'symbol': symbol,
-        'resolution': resolution,
+        'resolution': str(resolution),
         'from': from_time,
         'to': to_time
     }
@@ -157,7 +156,7 @@ def get_ohlcv(symbol, resolution, count=100):
         return None
 
     status = data.get('s')
-    if status not in ('ok', None) and 't' not in data and 'time' not in data:
+    if status == 'no_data':
         return None
 
     times = data.get('t') or data.get('time') or []
@@ -168,7 +167,7 @@ def get_ohlcv(symbol, resolution, count=100):
     volumes = data.get('v') or data.get('volume') or []
 
     min_len = min(len(times), len(opens), len(highs), len(lows), len(closes), len(volumes))
-    if min_len < 5:
+    if min_len < 10:
         return None
 
     times = times[:min_len]
@@ -178,7 +177,6 @@ def get_ohlcv(symbol, resolution, count=100):
     closes = closes[:min_len]
     volumes = volumes[:min_len]
 
-    # تصحیح تایم‌استمپ‌های میلی‌ثانیه‌ای در صورت وجود
     if times and float(times[0]) > 1e11:
         times = [float(t) / 1000.0 for t in times]
 
@@ -200,7 +198,7 @@ def get_ohlcv(symbol, resolution, count=100):
     df.sort_values(by='time', inplace=True)
     df.reset_index(drop=True, inplace=True)
 
-    if len(df) == 0:
+    if len(df) < 10:
         return None
 
     df = df.tail(count).reset_index(drop=True)
@@ -211,14 +209,12 @@ def get_ohlcv(symbol, resolution, count=100):
     return df
 
 def get_signal_index(df, resolution_minutes):
-    """تعیین دقیق ایندکس کندل بسته‌شده برای جلوگیری از سیگنال‌های نوسانی و کاذب"""
     if len(df) < 2:
         return -1
     try:
         last_candle_time = float(df['time'].iloc[-1])
         now = time.time()
         candle_duration = resolution_minutes * 60
-        # اگر زمان فعلی داخل تایم کندل آخر باشد، یعنی کندل هنوز باز است و ایندکس سیگنال ۲- خواهد بود
         if (now - last_candle_time) < candle_duration:
             return -2
         return -1
@@ -237,7 +233,7 @@ def get_btc_trend():
         if isinstance(items, list):
             for item in items:
                 code = item.get('code') or item.get('symbol')
-                if code == 'BTC_IRT':
+                if code == 'BTC_USDT':
                     try:
                         p_val = str(item.get('price') or item.get('last') or item.get('last_price') or 0).replace(',', '')
                         c_val = str(item.get('change') or item.get('change_24h') or item.get('percent_change') or 0).replace(',', '')
@@ -247,7 +243,7 @@ def get_btc_trend():
                         pass
                     break
 
-    df_btc = get_ohlcv("BTC_IRT", TIMEFRAME_1H, count=50)
+    df_btc = get_ohlcv("BTC_USDT", TIMEFRAME_1H, count=50)
 
     if df_btc is not None and len(df_btc) >= 22:
         df_btc['ema20'] = df_btc['close'].ewm(span=20, adjust=False).mean()
@@ -257,12 +253,11 @@ def get_btc_trend():
         current_p = btc_live_price if btc_live_price > 0 else df_btc['close'].iloc[-1]
 
         trend = "BULLISH" if btc_close > ema20 else ("BEARISH" if btc_close < ema20 else "NEUTRAL")
-        print(f"[{log_time} UTC] BTC_IRT: {current_p:,.0f} تومان | EMA20 H1: {ema20:,.0f} | روند: {trend}", flush=True)
+        print(f"[{log_time} UTC] BTC_USDT: {current_p:,.2f} USDT | EMA20 H1: {ema20:,.2f} | روند: {trend}", flush=True)
         return trend
 
-    # فال‌بک ایمن بر اساس تغییرات ۲۴ ساعته بازار در صورت کندی کندل‌ها
     trend = "BULLISH" if btc_change > 0 else ("BEARISH" if btc_change < 0 else "NEUTRAL")
-    print(f"[{log_time} UTC] BTC_IRT: {btc_live_price:,.0f} تومان | تغییر روزانه: %{btc_change:+.2f} | روند: {trend}", flush=True)
+    print(f"[{log_time} UTC] BTC_USDT: {btc_live_price:,.2f} USDT | تغییر روزانه: %{btc_change:+.2f} | روند: {trend}", flush=True)
     return trend
 
 def analyze_symbol(symbol, btc_trend):
@@ -337,7 +332,7 @@ def analyze_symbol(symbol, btc_trend):
     distance_to_res = (major_resistance - c_close) / c_close if c_close > 0 else 0
     safe_from_resistance = not (0 < distance_to_res < SR_SAFE_DISTANCE)
 
-    btc_permits_long = (btc_trend != "BEARISH") or (symbol == "BTC_IRT")
+    btc_permits_long = (btc_trend != "BEARISH") or (symbol == "BTC_USDT")
 
     if (btc_permits_long and long_h1_trend and (long_breakout or long_pullback)
             and safe_from_resistance and not is_spike_candle):
@@ -361,7 +356,7 @@ def analyze_symbol(symbol, btc_trend):
     distance_to_sup = (c_close - major_support) / c_close if c_close > 0 else 0
     safe_from_support = not (0 < distance_to_sup < SR_SAFE_DISTANCE)
 
-    btc_permits_short = (btc_trend != "BULLISH") or (symbol == "BTC_IRT")
+    btc_permits_short = (btc_trend != "BULLISH") or (symbol == "BTC_USDT")
 
     if (btc_permits_short and short_h1_trend and (short_breakout or short_pullback)
             and safe_from_support and not is_spike_candle):
@@ -369,6 +364,14 @@ def analyze_symbol(symbol, btc_trend):
         return ("SHORT", entry_type), current_price
 
     return None, current_price
+
+def format_price(p):
+    if p >= 100:
+        return f"{p:,.2f}"
+    elif p >= 1:
+        return f"{p:,.4f}"
+    else:
+        return f"{p:,.6f}"
 
 def manage_open_positions(symbol, current_price):
     if symbol not in open_positions or current_price is None or current_price <= 0:
@@ -386,14 +389,14 @@ def manage_open_positions(symbol, current_price):
             send_telegram_message(
                 f"🚨 <b>حد ضرر خورد (LONG)</b>\n"
                 f"نماد: {symbol}\n"
-                f"قیمت خروج: {current_price:,.0f} تومان"
+                f"قیمت خروج: {format_price(current_price)} USDT"
             )
             del open_positions[symbol]
         elif tp2 and current_price >= tp2:
             send_telegram_message(
                 f"✅ <b>تارگت دوم رسید (LONG)</b>\n"
                 f"نماد: {symbol}\n"
-                f"قیمت خروج: {current_price:,.0f} تومان"
+                f"قیمت خروج: {format_price(current_price)} USDT"
             )
             del open_positions[symbol]
         elif current_price >= tp1 and not pos['tp1_hit']:
@@ -406,19 +409,18 @@ def manage_open_positions(symbol, current_price):
             pos['sl'] = entry
 
     elif p_type == "SHORT":
-        # بررسی دقیق حد ضرر و تارگت‌های شورت
         if current_price >= sl:
             send_telegram_message(
                 f"🚨 <b>حد ضرر خورد (SHORT)</b>\n"
                 f"نماد: {symbol}\n"
-                f"قیمت خروج: {current_price:,.0f} تومان"
+                f"قیمت خروج: {format_price(current_price)} USDT"
             )
             del open_positions[symbol]
         elif tp2 and current_price <= tp2:
             send_telegram_message(
                 f"✅ <b>تارگت دوم رسید (SHORT)</b>\n"
                 f"نماد: {symbol}\n"
-                f"قیمت خروج: {current_price:,.0f} تومان"
+                f"قیمت خروج: {format_price(current_price)} USDT"
             )
             del open_positions[symbol]
         elif current_price <= tp1 and not pos['tp1_hit']:
@@ -433,7 +435,7 @@ def manage_open_positions(symbol, current_price):
 def bot_loop():
     send_telegram_message(
         "🤖 <b>ربات هوشمند معامله‌گر فعال شد.</b>\n"
-        "در حال پایش بازار با فیلتر پولبک و لیدر بیت‌کوین..."
+        "در حال پایش بازار تتری (USDT) با فیلتر پولبک و لیدر بیت‌کوین..."
     )
 
     while True:
@@ -472,10 +474,10 @@ def bot_loop():
                                 f"🔹 <b>نماد:</b> {symbol}\n"
                                 f"📌 <b>الگو:</b> {setup_name}\n"
                                 f"🔹 <b>قابلیت تعهدی:</b> {is_margin}\n"
-                                f"💵 <b>نقطه ورود:</b> {c_close:,.0f} تومان\n"
-                                f"🛑 <b>حد ضرر (SL):</b> {sl:,.0f} تومان\n"
-                                f"🎯 <b>تارگت ۱ (TP1):</b> {tp1:,.0f} تومان\n"
-                                f"🎯 <b>تارگت ۲ (TP2):</b> {tp2:,.0f} تومان\n\n"
+                                f"💵 <b>نقطه ورود:</b> {format_price(c_close)} USDT\n"
+                                f"🛑 <b>حد ضرر (SL):</b> {format_price(sl)} USDT\n"
+                                f"🎯 <b>تارگت ۱ (TP1):</b> {format_price(tp1)} USDT\n"
+                                f"🎯 <b>تارگت ۲ (TP2):</b> {format_price(tp2)} USDT\n\n"
                                 f"💡 <i>تأیید هم‌راستایی با روند ۱ ساعته و بیت‌کوین</i>"
                             )
                         else:
@@ -490,10 +492,10 @@ def bot_loop():
                                 f"🔴 <b>سیگنال ورود: فروش (SHORT)</b>\n\n"
                                 f"🔹 <b>نماد:</b> {symbol} (معامله تعهدی)\n"
                                 f"📌 <b>الگو:</b> {setup_name}\n"
-                                f"💵 <b>نقطه ورود:</b> {c_close:,.0f} تومان\n"
-                                f"🛑 <b>حد ضرر (SL):</b> {sl:,.0f} تومان\n"
-                                f"🎯 <b>تارگت ۱ (TP1):</b> {tp1:,.0f} تومان\n"
-                                f"🎯 <b>تارگت ۲ (TP2):</b> {tp2:,.0f} تومان\n\n"
+                                f"💵 <b>نقطه ورود:</b> {format_price(c_close)} USDT\n"
+                                f"🛑 <b>حد ضرر (SL):</b> {format_price(sl)} USDT\n"
+                                f"🎯 <b>تارگت ۱ (TP1):</b> {format_price(tp1)} USDT\n"
+                                f"🎯 <b>تارگت ۲ (TP2):</b> {format_price(tp2)} USDT\n\n"
                                 f"💡 <i>تأیید هم‌راستایی با روند ۱ ساعته و بیت‌کوین</i>"
                             )
 
