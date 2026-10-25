@@ -123,8 +123,7 @@ def safe_get_json(url, params=None, retries=3):
 def get_ohlcv(symbol, resolution, count=100):
     to_time = int(time.time())
     res_minutes = int(resolution)
-    # بازه زمانی وسیع‌تر و امن برای جلوگیری از خطای دیتای خالی
-    from_time = to_time - (count * res_minutes * 60 * 3)
+    from_time = to_time - (count * res_minutes * 60 * 2)
 
     params = {
         'symbol': symbol,
@@ -154,35 +153,34 @@ def get_ohlcv(symbol, resolution, count=100):
     return df
 
 def get_btc_trend():
-    df_btc = get_ohlcv("BTC_IRT", TIMEFRAME_1H, count=40)
     log_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
-    # گرفتن قیمت لحظه‌ای تیکر برای اطمینان از نمایش قیمت در هر شرایطی
-    fallback_data = safe_get_json(API_URL)
+    # گرفتن قیمت زنده و درصد تغییر از لیست مارکت‌ها
     btc_live_price = 0
+    btc_change = 0
+    fallback_data = safe_get_json(API_URL)
     if fallback_data and isinstance(fallback_data, dict):
         for item in fallback_data.get('results', []):
             if item.get('code') == 'BTC_IRT':
                 btc_live_price = float(item.get('price', 0))
+                btc_change = float(item.get('change', 0))
                 break
 
-    if df_btc is None or len(df_btc) < 25:
-        price_display = f"{btc_live_price:,.0f} تومان" if btc_live_price > 0 else "در حال دریافت..."
-        print(f"[{log_time} UTC] BTC_IRT: {price_display} | وضعیت کندل: در حال همگام‌سازی | روند: NEUTRAL", flush=True)
-        return "NEUTRAL"
+    df_btc = get_ohlcv("BTC_IRT", TIMEFRAME_1H, count=50)
 
-    ema20 = df_btc['close'].ewm(span=20, adjust=False).mean().iloc[-2]
-    btc_close = df_btc['close'].iloc[-2]
-    btc_current_price = btc_live_price if btc_live_price > 0 else df_btc['close'].iloc[-1]
+    # اگر دیتای کندل آمد، تحلیل با EMA20
+    if df_btc is not None and len(df_btc) >= 21:
+        ema20 = df_btc['close'].ewm(span=20, adjust=False).mean().iloc[-2]
+        btc_close = df_btc['close'].iloc[-2]
+        current_p = btc_live_price if btc_live_price > 0 else df_btc['close'].iloc[-1]
 
-    if btc_close > ema20:
-        trend = "BULLISH"
-    elif btc_close < ema20:
-        trend = "BEARISH"
-    else:
-        trend = "NEUTRAL"
+        trend = "BULLISH" if btc_close > ema20 else ("BEARISH" if btc_close < ema20 else "NEUTRAL")
+        print(f"[{log_time} UTC] BTC_IRT: {current_p:,.0f} تومان | EMA20 H1: {ema20:,.0f} | روند: {trend}", flush=True)
+        return trend
 
-    print(f"[{log_time} UTC] BTC_IRT Price: {btc_current_price:,.0f} تومان | Trend: {trend}", flush=True)
+    # حالت فال‌بک مطمئن: بر اساس تغییرات ۲۴ ساعته بازار بیت‌پین
+    trend = "BULLISH" if btc_change > 0 else ("BEARISH" if btc_change < 0 else "NEUTRAL")
+    print(f"[{log_time} UTC] BTC_IRT: {btc_live_price:,.0f} تومان | تغییر روزانه: %{btc_change:+.2f} | روند: {trend}", flush=True)
     return trend
 
 def analyze_symbol(symbol, btc_trend):
@@ -207,7 +205,7 @@ def analyze_symbol(symbol, btc_trend):
 
     df_1h = get_ohlcv(symbol, TIMEFRAME_1H, count=70)
 
-    if df_1h is None or len(df_1h) < MAJOR_SR_BARS + 2:
+    if df_1h is None or len(df_1h) < 22:
         return None, current_price
 
     df_1h['ema20'] = df_1h['close'].ewm(span=20, adjust=False).mean()
@@ -226,7 +224,8 @@ def analyze_symbol(symbol, btc_trend):
     if any(pd.isna(v) for v in [avg_volume, c_bb_upper, c_bb_lower, c_bb_middle]):
         return None, current_price
 
-    past_h1 = df_1h.iloc[-(MAJOR_SR_BARS + 1):-1]
+    sr_bars = min(MAJOR_SR_BARS, len(df_1h) - 2)
+    past_h1 = df_1h.iloc[-(sr_bars + 1):-1]
     major_resistance = past_h1['high'].max()
     major_support = past_h1['low'].min()
 
@@ -235,7 +234,7 @@ def analyze_symbol(symbol, btc_trend):
     current_range = c_high - c_low
     is_spike_candle = avg_candle_range > 0 and current_range > (avg_candle_range * 3.5)
 
-    # ------------------ سناریوی صعودی (LONG) ------------------
+    # سناریوی LONG
     long_h1_trend = c_close > h1_ema20
     long_breakout = (c_close > c_bb_upper) and (c_volume >= avg_volume * VOLUME_MULTIPLIER)
 
@@ -259,7 +258,7 @@ def analyze_symbol(symbol, btc_trend):
         entry_type = "شکست بولینگر (Breakout)" if long_breakout else "پولبک ناحیه میانی (Pullback Zone)"
         return ("LONG", entry_type), current_price
 
-    # ------------------ سناریوی نزولی (SHORT) ------------------
+    # سناریوی SHORT
     short_h1_trend = c_close < h1_ema20
     short_breakout = (c_close < c_bb_lower) and (c_volume >= avg_volume * VOLUME_MULTIPLIER)
 
@@ -335,7 +334,7 @@ def manage_open_positions(symbol, current_price):
                 f"قیمت خروج: {current_price:,.0f} تومان"
             )
             del open_positions[symbol]
-        elif current_price <= tp1 and not pos['tp1_hit']:
+        elif current_price >= tp1 and not pos['tp1_hit']:
             send_telegram_message(
                 f"🎯 <b>تارگت اول رسید (SHORT)</b>\n"
                 f"نماد: {symbol}\n"
