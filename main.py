@@ -123,8 +123,8 @@ def safe_get_json(url, params=None, retries=3):
 def get_ohlcv(symbol, resolution, count=100):
     to_time = int(time.time())
     res_minutes = int(resolution)
-    # بازه زمانی دقیق و استاندارد متناسب با تعداد کندل
-    from_time = to_time - (count * res_minutes * 60) - 3600
+    # بازه زمانی وسیع‌تر و امن برای جلوگیری از خطای دیتای خالی
+    from_time = to_time - (count * res_minutes * 60 * 3)
 
     params = {
         'symbol': symbol,
@@ -157,23 +157,23 @@ def get_btc_trend():
     df_btc = get_ohlcv("BTC_IRT", TIMEFRAME_1H, count=40)
     log_time = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
+    # گرفتن قیمت لحظه‌ای تیکر برای اطمینان از نمایش قیمت در هر شرایطی
+    fallback_data = safe_get_json(API_URL)
+    btc_live_price = 0
+    if fallback_data and isinstance(fallback_data, dict):
+        for item in fallback_data.get('results', []):
+            if item.get('code') == 'BTC_IRT':
+                btc_live_price = float(item.get('price', 0))
+                break
+
     if df_btc is None or len(df_btc) < 25:
-        # اگر دیتای کندل تایم اوت داد، قیمت لحظه‌ای از تیکر چک می‌شود
-        fallback_data = safe_get_json(API_URL)
-        btc_price_str = "نامشخص"
-        if fallback_data and isinstance(fallback_data, dict):
-            results = fallback_data.get('results', [])
-            for item in results:
-                if item.get('code') == 'BTC_IRT':
-                    p = float(item.get('price', 0))
-                    btc_price_str = f"{p:,.0f} تومان"
-                    break
-        print(f"[{log_time} UTC] BTC_IRT: {btc_price_str} | وضعیت کندل: در حال همگام‌سازی | روند: NEUTRAL", flush=True)
+        price_display = f"{btc_live_price:,.0f} تومان" if btc_live_price > 0 else "در حال دریافت..."
+        print(f"[{log_time} UTC] BTC_IRT: {price_display} | وضعیت کندل: در حال همگام‌سازی | روند: NEUTRAL", flush=True)
         return "NEUTRAL"
 
     ema20 = df_btc['close'].ewm(span=20, adjust=False).mean().iloc[-2]
     btc_close = df_btc['close'].iloc[-2]
-    btc_current_price = df_btc['close'].iloc[-1]
+    btc_current_price = btc_live_price if btc_live_price > 0 else df_btc['close'].iloc[-1]
 
     if btc_close > ema20:
         trend = "BULLISH"
