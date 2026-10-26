@@ -18,7 +18,7 @@ OHLC_URL = f"{BASE_API}/v1/mkt/tv/history/"
 BB_PERIOD = 20
 BB_STD = 2.0
 
-CHECK_INTERVAL = 300  # هر ۵ دقیقه
+CHECK_INTERVAL = 60   # هر ۱ دقیقه چک می‌کند تا به بازه پایانی برسد
 TIMEFRAME = "60"      # کندل‌های ۱ ساعته
 
 EMA_TREND_PERIOD = 200
@@ -94,6 +94,15 @@ def send_telegram(message):
         print(f"Telegram Error: {e}")
         return False
 
+def get_btc_price():
+    try:
+        df = get_ohlc("BTC_USDT", resolution="60", count=5)
+        if df is not None and not df.empty:
+            return df.iloc[-1]["close"]
+    except:
+        pass
+    return "نامشخص"
+
 def get_ohlc(symbol, resolution="60", count=350):
     try:
         now_ts = int(time.time())
@@ -148,11 +157,11 @@ def compute_indicators(df):
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df["atr"] = tr.rolling(window=ATR_PERIOD).mean()
     
-    # RSI
+    # RSI با ایمنی در برابر تقسیم بر صفر
     delta = df["close"].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=RSI_PERIOD).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=RSI_PERIOD).mean()
-    rs = gain / loss
+    rs = gain / loss.replace(0, 0.001)
     df["rsi"] = 100 - (100 / (1 + rs))
     
     return df
@@ -166,8 +175,6 @@ def check_sensei_strategy(symbol, df):
     prev = df.iloc[-2]
     
     support = df['low'].iloc[-26:-4].min()
-    
-    # حجم نرمال: حداقل ۷۰٪ میانگین حجم (نه بازار مرده و نه غیرعادی)
     vol_normal = last["volume"] >= (last["vol_sma"] * 0.7)
     
     if prev["close"] <= support * 1.005 and last["close"] > support and vol_normal:
@@ -202,7 +209,7 @@ def check_trend_strategy(symbol, df):
     vol_normal = last["volume"] >= (last["vol_sma"] * 0.7)
     is_spot_only = symbol in SPOT_ONLY_MARKETS
     
-    # --- سیگنال لانگ (هم در تعهدی و هم در اسپات مجاز است) ---
+    # --- سیگنال لانگ ---
     if prev["close"] <= prev["bb_lower"] and last["close"] > last["bb_lower"]:
         if last["close"] > ema_val and rsi_val < 45 and vol_normal:
             key = f"{symbol}_trend_long_{int(last['time'])}"
@@ -221,7 +228,7 @@ def check_trend_strategy(symbol, df):
                 if send_telegram(msg):
                     SENT_KEYS.add(key)
 
-    # --- سیگنال شورت (فقط در نمادهای تعهدی مجاز است؛ روی ۲۰ نماد اسپات شورت نمی‌دهد) ---
+    # --- سیگنال شورت ---
     elif prev["close"] >= prev["bb_upper"] and last["close"] < prev["bb_upper"] and not is_spot_only:
         if last["close"] < ema_val and rsi_val > 55 and vol_normal:
             key = f"{symbol}_trend_short_{int(last['time'])}"
@@ -241,29 +248,42 @@ def check_trend_strategy(symbol, df):
 
 def bot_worker():
     print("🤖 ربات ترید تتری بیت‌پین شروع شد...")
-    send_telegram("🤖 *ربات ترید تتری (۱۰۰ تعهدی + ۲۰ اسپات) روشن شد و در حال اسکن بازار است.*")
+    btc_p = get_btc_price()
+    send_telegram(f"🤖 *ربات ترید تتری (۱۰۰ تعهدی + ۲۰ اسپات) روشن شد.*\n📊 قیمت بیت‌کوین (سلامت سنج): `{btc_p}` USDT\n⏱ اسکن بازار فعال در ۵ دقیقه پایانی هر ساعت.")
     while True:
         try:
-            for symbol in ALL_SYMBOLS:
-                df = get_ohlc(symbol, resolution=TIMEFRAME, count=350)
-                if df is not None and not df.empty:
-                    df = compute_indicators(df)
-                    if df is not None:
-                        check_sensei_strategy(symbol, df)
-                        check_trend_strategy(symbol, df)
-                time.sleep(1)
+            now = datetime.now(timezone.utc)
+            current_minute = now.minute
+            
+            if 50 <= current_minute <= 59:
+                for symbol in ALL_SYMBOLS:
+                    df = get_ohlc(symbol, resolution=TIMEFRAME, count=350)
+                    if df is not None and not df.empty:
+                        df = compute_indicators(df)
+                        if df is not None:
+                            check_sensei_strategy(symbol, df)
+                            check_trend_strategy(symbol, df)
+                    time.sleep(0.5)
+                time.sleep(300)
+            else:
+                time.sleep(CHECK_INTERVAL)
+                
         except Exception as e:
             print(f"Main loop error: {e}")
-        
-        time.sleep(CHECK_INTERVAL)
+            time.sleep(60)
 
-# ================= سرور سلامت برای Render =================
+# ================= سرور سلامت برای Render (با پشتیبانی از HEAD برای رفع خطای لاگ) =================
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write("Bitpin USDT Bot is Active!".encode("utf-8"))
+
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
 
 def run_server():
     port = int(os.environ.get("PORT", 10000))
