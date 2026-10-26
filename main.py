@@ -27,8 +27,36 @@ PULLBACK_TP_PC = 4.0
 CHECK_INTERVAL = 300  # هر ۵ دقیقه
 TIMEFRAME = "60"      # کندل ۱ ساعته
 
-# لیست مارکت‌های اسپات برای جلوگیری از ارسال اشتباه شورت
-SPOT_ONLY_MARKETS = []
+# ================= لیست ۱۲۰ ارز برتر و معتبر (شامل فیوچرز/تعهدی و زی‌کش) =================
+SPOT_SYMBOLS = [
+    "ZEC_USDT", "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "ADA_USDT", "DOGE_USDT", 
+    "AVAX_USDT", "LINK_USDT", "TON_USDT", "PEPE_USDT", "WIF_USDT", "NOT_USDT", 
+    "SUI_USDT", "NEAR_USDT", "ARBITRUM_USDT", "OP_USDT", "MATIC_USDT", "POL_USDT",
+    "JUP_USDT", "BMT_USDT", "RENDER_USDT", "FET_USDT", "INJ_USDT", "TIA_USDT",
+    "SEI_USDT", "APT_USDT", "ATOM_USDT", "FTM_USDT", "UNI_USDT", "LTC_USDT",
+    "SHIB_USDT", "BCH_USDT", "ETC_USDT", "FIL_USDT", "ICP_USDT", "RUNE_USDT",
+    "GRT_USDT", "STX_USDT", "IMX_USDT", "ONDO_USDT", "MANA_USDT", "SAND_USDT",
+    "AXS_USDT", "DYDX_USDT", "GALA_USDT", "CHZ_USDT", "CRV_USDT", "AAVE_USDT",
+    "MKR_USDT", "SNX_USDT", "LDO_USDT", "AR_USDT", "PYTH_USDT", "STRK_USDT",
+    "BOME_USDT", "FLOKI_USDT", "BONK_USDT", "ENS_USDT", "PENDLE_USDT",
+    "JTO_USDT", "PORTAL_USDT", "PIXEL_USDT", "ALT_USDT", "MANTA_USDT", "XAI_USDT",
+    "ACE_USDT", "NFP_USDT", "AI_USDT", "SAVM_USDT", "XMR_USDT", "ALGO_USDT",
+    "VET_USDT", "HBAR_USDT", "QNT_USDT", "EGLD_USDT", "THETA_USDT",
+    "XTZ_USDT", "EOS_USDT", "FLOW_USDT", "KAS_USDT", "BSV_USDT", "NEO_USDT",
+    "CAKE_USDT", "COMP_USDT", "ZRX_USDT", "BAT_USDT", "ENJ_USDT",
+    "OCEAN_USDT", "RLC_USDT", "KNC_USDT", "BAL_USDT", "BAND_USDT",
+    "SKL_USDT", "CVC_USDT", "STORJ_USDT", "OGN_USDT", "SNT_USDT", "STMX_USDT",
+    "CTSI_USDT", "CHR_USDT", "DGB_USDT", "SC_USDT", "ZEN_USDT", "IOST_USDT",
+    "ICX_USDT", "ONT_USDT", "ZIL_USDT", "RVN_USDT", "WAN_USDT", "COTI_USDT",
+    "LRC_USDT", "ANKR_USDT", "OG_USDT", "ASR_USDT", "ATM_USDT", "BAR_USDT"
+]
+
+# بازارهایی که صرفاً اسپات هستند (نباید برای آن‌ها شورت ارسال شود)
+SPOT_ONLY_MARKETS = [
+    "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "ADA_USDT", "DOGE_USDT", 
+    "AVAX_USDT", "LINK_USDT", "TON_USDT", "PEPE_USDT", "WIF_USDT", "NOT_USDT",
+    "SHIB_USDT", "BCH_USDT", "ETC_USDT", "FIL_USDT", "ICP_USDT", "RUNE_USDT"
+]
 
 # ================= سرور HTTP برای رندر (Render Keep-Alive) =================
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -71,30 +99,6 @@ def get_bitcoin_price():
         pass
     return 0.0
 
-def get_bitpin_markets():
-    global SPOT_ONLY_MARKETS
-    try:
-        resp = requests.get(API_URL, timeout=15)
-        if resp.status_code == 200:
-            data = resp.json()
-            markets = data.get("results", [])
-            symbols = []
-            spot_list = []
-            for m in markets:
-                if m.get("quote_currency", {}).get("code") == "USDT":
-                    code = m.get("code")
-                    if code:
-                        symbols.append(code)
-                        # تشخیص بازارهای اسپات بر اساس ساختار صرافی
-                        is_futures = m.get("is_futures", False) or "PERP" in code
-                        if not is_futures:
-                            spot_list.append(code)
-            SPOT_ONLY_MARKETS = spot_list
-            return symbols
-    except Exception as e:
-        print(f"Market Fetch Error: {e}")
-    return []
-
 def fetch_ohlcv(symbol):
     try:
         now = int(time.time())
@@ -119,25 +123,22 @@ def fetch_ohlcv(symbol):
         print(f"OHLC Error for {symbol}: {e}")
     return None
 
-# ================= استراتژی‌ها =================
+# ================= استراتژی‌ها (بررسی روی کندل بسته شده) =================
 def check_sensei_strategy(df, symbol):
     """روش استاد | بازگشتی (S&D + Reversal)"""
     if df is None or len(df) < 30:
         return None
     
-    recent = df.iloc[-25:-3]
+    recent = df.iloc[-26:-4]
     support = recent['low'].min()
     resistance = recent['high'].max()
     
-    last_candle = df.iloc[-1]
-    prev_candle = df.iloc[-2]
+    last_candle = df.iloc[-2]  # کندل بسته شده آخر
+    avg_vol = df['volume'].iloc[-21:-2].mean()
     
-    # حجم میانگین
-    avg_vol = df['volume'].iloc[-20:-1].mean()
-    
-    # بررسی ریجکشن کف (حمایت) -> لانگ
+    # ریجکشن کف -> لانگ
     if last_candle['low'] <= support * 1.002 and last_candle['close'] > last_candle['open']:
-        if last_candle['volume'] < avg_vol * 1.2:  # حجم کم در کف (فرسودگی فروشندگان)
+        if last_candle['volume'] < avg_vol * 1.2:
             return {
                 "type": "LONG",
                 "strategy": "🎯 روش استاد | بازگشتی",
@@ -147,10 +148,10 @@ def check_sensei_strategy(df, symbol):
                 "tp2": last_candle['close'] + (last_candle['close'] - support) * 2.5
             }
             
-    # بررسی ریجکشن سقف (مقاومت) -> شورت
+    # ریجکشن سقف -> شورت (با محافظت از اسپات)
     if last_candle['high'] >= resistance * 0.998 and last_candle['close'] < last_candle['open']:
         if symbol in SPOT_ONLY_MARKETS:
-            return None # مانع از ارسال شورت روی اسپات
+            return None
         if last_candle['volume'] < avg_vol * 1.2:
             return {
                 "type": "SHORT",
@@ -174,16 +175,13 @@ def check_trend_strategy(df, symbol):
     upper = sma + (BB_STD * std)
     lower = sma - (BB_STD * std)
     
-    last_close = close.iloc[-1]
-    prev_close = close.iloc[-2]
-    last_lower = lower.iloc[-1]
-    last_upper = upper.iloc[-1]
-    
-    # روند بیت کوین برای فیلتر جهت (ساده شده با SMA20)
-    btc_sma = sma.iloc[-1]
+    last_close = close.iloc[-2]  # کندل بسته شده
+    prev_close = close.iloc[-3]  # کندل ماقبل آخر بسته شده
+    last_lower = lower.iloc[-2]
+    last_upper = upper.iloc[-2]
     
     # پولبک به باند پایین -> لانگ
-    if prev_close <= lower.iloc[-2] and last_close > last_lower:
+    if prev_close <= lower.iloc[-3] and last_close > last_lower:
         return {
             "type": "LONG",
             "strategy": "🚀 روش خودمان | روند",
@@ -194,7 +192,7 @@ def check_trend_strategy(df, symbol):
         }
         
     # پولبک به باند بالا -> شورت
-    if prev_close >= upper.iloc[-2] and last_close < last_upper:
+    if prev_close >= upper.iloc[-3] and last_close < last_upper:
         if symbol in SPOT_ONLY_MARKETS:
             return None
         return {
@@ -211,16 +209,15 @@ def check_trend_strategy(df, symbol):
 # ================= حلقه اصلی ربات =================
 def scan_markets():
     print(f"[{datetime.now(timezone.utc)}] Scan started...")
-    symbols = get_bitpin_markets()
     btc_price = get_bitcoin_price()
     
-    for symbol in symbols:
+    for symbol in SPOT_SYMBOLS:
         df = fetch_ohlcv(symbol)
         if df is not None:
             # ۱. اولویت با روش استاد
             signal = check_sensei_strategy(df, symbol)
             if not signal:
-                # ۲. اگر روش استاد سیگنال نداد، بررسی روش خودمان
+                # ۲. روش خودمان
                 signal = check_trend_strategy(df, symbol)
                 
             if signal:
@@ -228,7 +225,7 @@ def scan_markets():
                 msg = (
                     f"🚨 <b>سیگنال جدید معاملاتی</b>\n\n"
                     f"{btc_text}"
-                    f" ارزی: <b>{symbol}</b>\n"
+                    f" ارز: <b>{symbol}</b>\n"
                     f" استراتژی: <b>{signal['strategy']}</b>\n"
                     f" جهت: <b>{signal['type']}</b>\n"
                     f" نقطه ورود: <code>{signal['entry']}</code>\n"
@@ -238,7 +235,7 @@ def scan_markets():
                     f"⏰ زمان: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
                 )
                 send_telegram_message(msg)
-        time.sleep(0.5) # تاخیر برای جلوگیری از محدودیت نرخ صرافی
+        time.sleep(0.5)
 
 def main_loop():
     while True:
@@ -249,10 +246,9 @@ def main_loop():
         time.sleep(CHECK_INTERVAL)
 
 if __name__ == "__main__":
-    # استارت سرور وب برای رندر در ترد جداگانه
     t = threading.Thread(target=run_server)
     t.daemon = True
     t.start()
     
-    print("Bitpin Bot Started with BTC Dashboard Price...")
+    print("Bitpin Bot Started with 120 Symbols & Closed Candle Evaluation...")
     main_loop()
