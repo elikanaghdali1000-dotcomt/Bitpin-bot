@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"
+TELEGRAM_BOT_TOKEN = "GAPGPTMASKTOKENp867rjo71zlX0X"
 TELEGRAM_CHAT_ID = "6643451227"
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
@@ -156,18 +156,28 @@ def fetch_ohlcv(symbol):
     return None
 
 def get_bitcoin_price():
-    """دریافت قیمت آخرین کلوز BTC برای نمایش در داشبورد"""
+    """دریافت قیمت بیت‌کوین از /v1/mkt/tickers/ برای نمایش در داشبورد"""
     try:
-        now = int(time.time())
-        start = now - 7200
-        url = f"{OHLC_URL}?symbol=BTC_USDT&resolution=60&from={start}&to={now}"
+        url = f"{BASE_API}/v1/mkt/tickers/"
         resp = requests.get(url, headers=HEADERS, timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            if data and "c" in data and len(data["c"]) > 0:
-                return float(data["c"][-1])
-    except Exception:
-        pass
+
+            # طبق داکیومنت: لیست از تیکرها
+            if isinstance(data, list):
+                for t in data:
+                    if t.get("symbol") == "BTC_USDT" and t.get("price") is not None:
+                        return float(t["price"])
+
+            # اگر ساختار دیگری بود (احتیاطی)
+            if isinstance(data, dict):
+                tickers = data.get("results") or data.get("tickers") or []
+                for t in tickers:
+                    if t.get("symbol") == "BTC_USDT" and t.get("price") is not None:
+                        return float(t["price"])
+
+    except Exception as e:
+        print(f"BTC price error: {e}")
     return 0.0
 
 # ================= استراتژی‌ها (بررسی روی کندل بسته شده) =================
