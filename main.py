@@ -167,7 +167,7 @@ def compute_indicators(df):
     return df
 
 def check_sensei_strategy(symbol, df):
-    """روش سنسی / پولبک با حجم نرمال"""
+    """روش سنسی / پولبک به حمایت با شرط حجم خشک (Dry Volume)"""
     if len(df) < 30:
         return
     
@@ -175,9 +175,11 @@ def check_sensei_strategy(symbol, df):
     prev = df.iloc[-2]
     
     support = df['low'].iloc[-26:-4].min()
-    vol_normal = last["volume"] >= (last["vol_sma"] * 0.7)
     
-    if prev["close"] <= support * 1.005 and last["close"] > support and vol_normal:
+    # شرط حجم خشک: حجم کندل پولبک پایین‌تر یا مساوی ۷۰ درصد میانگین حجم باشد
+    is_dry_volume = last["volume"] <= (last["vol_sma"] * 0.7)
+    
+    if prev["close"] <= support * 1.005 and last["close"] > support and is_dry_volume:
         key = f"{symbol}_sensei_long_{int(last['time'])}"
         if key not in SENT_KEYS:
             entry = last["close"]
@@ -185,7 +187,7 @@ def check_sensei_strategy(symbol, df):
             tp1 = entry + (entry - sl) * 1.5
             tp2 = entry + (entry - sl) * 2.5
             market_type = "اسپات (فقط خرید)" if symbol in SPOT_ONLY_MARKETS else "تعهدی / فیوچرز"
-            msg = (f"🎯 *سیگنال پولبک سنسی (LONG)*\n"
+            msg = (f"🎯 *سیگنال پولبک سنسی (حجم خشک) (LONG)*\n"
                    f"▫️ ارز: `{symbol}` ({market_type})\n"
                    f"▫️ قیمت ورود: `{entry}` USDT\n"
                    f"🛡 حد ضرر: `{round(sl, 4)}`\n"
@@ -249,7 +251,7 @@ def check_trend_strategy(symbol, df):
 def bot_worker():
     print("🤖 ربات ترید تتری بیت‌پین شروع شد...")
     btc_p = get_btc_price()
-    send_telegram(f"🤖 *ربات ترید تتری (۱۰۰ تعهدی + ۲۰ اسپات) روشن شد.*\n📊 قیمت بیت‌کوین (سلامت سنج): `{btc_p}` USDT\n⏱ اسکن بازار فعال در ۵ دقیقه پایانی هر ساعت.")
+    send_telegram(f"🤖 *ربات ترید تتری (۱۰۰ تعهدی + ۲۰ اسپات) روشن شد.*\n📊 قیمت بیت‌کوین (سلامت سنج): `{btc_p}` USDT\n⏱ اسکن بازار فعال در ۵ دقیقه پایانی هر ساعت (با فیلتر حجم خشک در پولبک).")
     while True:
         try:
             now = datetime.now(timezone.utc)
