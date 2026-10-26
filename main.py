@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"
+TELEGRAM_BOT_TOKEN = "*******"
 TELEGRAM_CHAT_ID = "6643451227"
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
@@ -20,28 +20,17 @@ BB_PERIOD = 20
 BB_STD = 2.0
 
 # حد سود و ضرر مخصوص پولبک
-PULLBACK_SL_PCT = 0.02
-PULLBACK_TP1_PCT = 0.02
-PULLBACK_TP2_PCT = 0.04
+PULLBACK_SL_PC = 2.0
+PULLBACK_TP_PC = 4.0
 
-# حد سود و ضرر مخصوص استاد (بازگشتی)
-SENSEI_SL_PCT = 0.025
-SENSEI_TP1_PCT = 0.03
-SENSEI_TP2_PCT = 0.06
+# فواصل زمانی و تایم‌فریم
+CHECK_INTERVAL = 300  # هر ۵ دقیقه
+TIMEFRAME = "60"      # کندل ۱ ساعته
 
-LEVERAGE = 3
-CHECK_INTERVAL = 300  # هر 5 دقیقه
+# لیست مارکت‌های اسپات برای جلوگیری از ارسال اشتباه شورت
+SPOT_ONLY_MARKETS = []
 
-# وضعیت پوزیشن‌های فعال (برای مدیریت SL/TP)
-active_positions = {}
-positions_lock = threading.Lock()
-
-# کش برای داده‌های کندل جهت کاهش درخواست‌های تکراری
-ohlc_cache = {}
-ohlc_cache_lock = threading.Lock()
-CACHE_TTL = 180  # 3 دقیقه
-
-# ================= سرور HTTP برای پایش در رندر (Keep-Alive) =================
+# ================= سرور HTTP برای رندر (Render Keep-Alive) =================
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -51,332 +40,219 @@ class SimpleHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         return
 
-def run_http_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+def run_server():
+    port = int(os.getenv("PORT", 10000))
+    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
     server.serve_forever()
 
-# ================= توابع ارتباطی و ارسال پیام =================
+# ================= توابع ارتباطی و تلگرام =================
 def send_telegram_message(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "Markdown"
+        "parse_mode": "HTML"
     }
-    for attempt in range(3):
-        try:
-            resp = requests.post(url, json=payload, timeout=10)
-            if resp.status_code == 200:
-                return
-        except Exception as e:
-            time.sleep(2)
+    try:
+        requests.post(url, json=payload, timeout=10)
+    except Exception as e:
+        print(f"Telegram Error: {e}")
+
+def get_bitcoin_price():
+    """دریافت قیمت لحظه‌ای بیت‌کوین برای نمایش در داشبورد"""
+    try:
+        url = f"{OHLC_URL}?symbol=BTC_USDT&resolution=60&from={int(time.time())-7200}&to={int(time.time())}"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and "c" in data and len(data["c"]) > 0:
+                return float(data["c"][-1])
+    except Exception:
+        pass
+    return 0.0
 
 def get_bitpin_markets():
+    global SPOT_ONLY_MARKETS
     try:
         resp = requests.get(API_URL, timeout=15)
         if resp.status_code == 200:
             data = resp.json()
             markets = data.get("results", [])
             symbols = []
+            spot_list = []
             for m in markets:
-                if m.get("quote_currency", {}).get("code") in ["USDT", "IRT", "USD"]:
+                if m.get("quote_currency", {}).get("code") == "USDT":
                     code = m.get("code")
                     if code:
                         symbols.append(code)
+                        # تشخیص بازارهای اسپات بر اساس ساختار صرافی
+                        is_futures = m.get("is_futures", False) or "PERP" in code
+                        if not is_futures:
+                            spot_list.append(code)
+            SPOT_ONLY_MARKETS = spot_list
             return symbols
     except Exception as e:
-        print(f"Error fetching markets: {e}")
+        print(f"Market Fetch Error: {e}")
     return []
 
-def get_ohlcv(symbol, resolution="60", count=100):
-    cache_key = f"{symbol}_{resolution}"
-    now = time.time()
-    
-    with ohlc_cache_lock:
-        if cache_key in ohlc_cache:
-            cached_data, timestamp = ohlc_cache[cache_key]
-            if now - timestamp < CACHE_TTL:
-                return cached_data.copy()
+def fetch_ohlcv(symbol):
+    try:
+        now = int(time.time())
+        start = now - (300 * 3600)  # ۳۰۰ کندل قبل
+        url = f"{OHLC_URL}?symbol={symbol}&resolution={TIMEFRAME}&from={start}&to={now}"
+        resp = requests.get(url, timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            if data and "t" in data and len(data["t"]) > 50:
+                df = pd.DataFrame({
+                    'time': data['t'],
+                    'open': data['o'],
+                    'high': data['h'],
+                    'low': data['l'],
+                    'close': data['c'],
+                    'volume': data['v']
+                })
+                for col in ['open', 'high', 'low', 'close', 'volume']:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                return df
+    except Exception as e:
+        print(f"OHLC Error for {symbol}: {e}")
+    return None
 
-    end_time = int(now)
-    # احتیاط برای تایم‌فریم‌های مختلف
-    if resolution == "15":
-        start_time = end_time - (count * 15 * 60 * 2)
-    else:
-        start_time = end_time - (count * 3600 * 2)
-
-    params = {
-        "symbol": symbol,
-        "resolution": resolution,
-        "from": start_time,
-        "to": end_time
-    }
+# ================= استراتژی‌ها =================
+def check_sensei_strategy(df, symbol):
+    """روش استاد | بازگشتی (S&D + Reversal)"""
+    if df is None or len(df) < 30:
+        return None
     
-    for attempt in range(3):
-        try:
-            resp = requests.get(OHLC_URL, params=params, timeout=10)
-            if resp.status_code == 200:
-                res_data = resp.json()
-                if res_data.get("s") == "ok":
-                    df = pd.DataFrame({
-                        "time": res_data.get("t"),
-                        "open": res_data.get("o"),
-                        "high": res_data.get("h"),
-                        "low": res_data.get("l"),
-                        "close": res_data.get("c"),
-                        "volume": res_data.get("v")
-                    })
-                    df = df.dropna()
-                    for col in ["open", "high", "low", "close", "volume"]:
-                        df[col] = df[col].astype(float)
-                    
-                    if len(df) > count:
-                        df = df.tail(count).reset_index(drop=True)
-                        
-                    with ohlc_cache_lock:
-                        ohlc_cache[cache_key] = (df, now)
-                    return df
-            time.sleep(1)
-        except Exception as e:
-            time.sleep(2)
+    recent = df.iloc[-25:-3]
+    support = recent['low'].min()
+    resistance = recent['high'].max()
+    
+    last_candle = df.iloc[-1]
+    prev_candle = df.iloc[-2]
+    
+    # حجم میانگین
+    avg_vol = df['volume'].iloc[-20:-1].mean()
+    
+    # بررسی ریجکشن کف (حمایت) -> لانگ
+    if last_candle['low'] <= support * 1.002 and last_candle['close'] > last_candle['open']:
+        if last_candle['volume'] < avg_vol * 1.2:  # حجم کم در کف (فرسودگی فروشندگان)
+            return {
+                "type": "LONG",
+                "strategy": "🎯 روش استاد | بازگشتی",
+                "entry": last_candle['close'],
+                "sl": support * 0.99,
+                "tp1": last_candle['close'] + (last_candle['close'] - support) * 1.5,
+                "tp2": last_candle['close'] + (last_candle['close'] - support) * 2.5
+            }
+            
+    # بررسی ریجکشن سقف (مقاومت) -> شورت
+    if last_candle['high'] >= resistance * 0.998 and last_candle['close'] < last_candle['open']:
+        if symbol in SPOT_ONLY_MARKETS:
+            return None # مانع از ارسال شورت روی اسپات
+        if last_candle['volume'] < avg_vol * 1.2:
+            return {
+                "type": "SHORT",
+                "strategy": "🎯 روش استاد | بازگشتی",
+                "entry": last_candle['close'],
+                "sl": resistance * 1.01,
+                "tp1": last_candle['close'] - (resistance - last_candle['close']) * 1.5,
+                "tp2": last_candle['close'] - (resistance - last_candle['close']) * 2.5
+            }
             
     return None
 
-# ================= توابع اندیکاتورها و تحلیل تکنیکال =================
-def calculate_indicators(df):
-    if df is None or len(df) < BB_PERIOD:
-        return df
-    
-    df["sma"] = df["close"].rolling(window=BB_PERIOD).mean()
-    df["std"] = df["close"].rolling(window=BB_PERIOD).std()
-    df["upper_bb"] = df["sma"] + (df["std"] * BB_STD)
-    df["lower_bb"] = df["sma"] - (df["std"] * BB_STD)
-    df["volume_sma"] = df["volume"].rolling(window=20).mean()
-    
-    # اندیکاتورهای کمکی برای روش استاد
-    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
-    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
-    
-    return df
-
-def get_btc_trend():
-    """بررسی روند کلی بازار از روی بیت‌کوین (BTC_USDT)"""
-    df = get_ohlcv("BTC_USDT", resolution="60", count=50)
-    if df is None or len(df) < 20:
-        return "NEUTRAL"
-    df = calculate_indicators(df)
-    last = df.iloc[-1]
-    if last["close"] > last["ema20"]:
-        return "BULLISH"
-    elif last["close"] < last["ema20"]:
-        return "BEARISH"
-    return "NEUTRAL"
-
-# ================= استراتژی ۱: روش استاد (SENSEI - بازگشتی / S&D / حجم) =================
-def check_sensei_strategy(df, symbol):
-    """
-    روش استاد: بازگشت از حمایت/مقاومت با کندل رد (Pinbar/Rejection) و فرسودگی حجم
-    """
+def check_trend_strategy(df, symbol):
+    """روش خودمان | روند (Bollinger Pullback)"""
     if df is None or len(df) < 30:
         return None
         
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    prev2 = df.iloc[-3]
+    close = df['close']
+    sma = close.rolling(BB_PERIOD).mean()
+    std = close.rolling(BB_PERIOD).std()
+    upper = sma + (BB_STD * std)
+    lower = sma - (BB_STD * std)
     
-    # شناسایی سطوح کلیدی (مینیمم و ماکزیمم 20 کندل قبل به جز 3 کندل آخر)
-    history_slice = df.iloc[-25:-3]
-    support_level = history_slice["low"].min()
-    resistance_level = history_slice["high"].max()
+    last_close = close.iloc[-1]
+    prev_close = close.iloc[-2]
+    last_lower = lower.iloc[-1]
+    last_upper = upper.iloc[-1]
     
-    # بررسی فرسودگی حجم در نواحی بحرانی
-    avg_vol = df["volume"].tail(20).mean()
-    is_exhaustion_vol = prev["volume"] < (avg_vol * 0.7) or last["volume"] < (avg_vol * 0.7)
+    # روند بیت کوین برای فیلتر جهت (ساده شده با SMA20)
+    btc_sma = sma.iloc[-1]
     
-    body = abs(last["close"] - last["open"])
-    candle_range = last["high"] - last["low"]
-    if candle_range == 0:
-        return None
-        
-    # کندل بازگشتی (پین‌بار یا رد قیمت)
-    is_pinbar_long = (last["close"] > last["open"]) and ((last["open"] - last["low"]) > body * 1.5)
-    is_pinbar_short = (last["close"] < last["open"]) and ((last["high"] - last["open"]) > body * 1.5)
-    
-    # 1. سیگنال SHORT استاد (برخورد به مقاومت بالا + حجم فرسوده + رد قیمت)
-    near_resistance = last["high"] >= resistance_level * 0.992
-    if near_resistance and (is_pinbar_short or last["close"] < prev["low"]) and is_exhaustion_vol:
-        entry = last["close"]
-        sl = entry * (1 + SENSEI_SL_PCT)
-        tp1 = entry * (1 - SENSEI_TP1_PCT)
-        tp2 = entry * (1 - SENSEI_TP2_PCT)
+    # پولبک به باند پایین -> لانگ
+    if prev_close <= lower.iloc[-2] and last_close > last_lower:
         return {
-            "strategy": "SENSEI",
-            "type": "SHORT",
-            "entry": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "reason": "مقاومت استاد + حجم فرسوده + رد قیمت (Short)"
+            "type": "LONG",
+            "strategy": "🚀 روش خودمان | روند",
+            "entry": last_close,
+            "sl": last_close * (1 - PULLBACK_SL_PC / 100),
+            "tp1": last_close * (1 + PULLBACK_TP_PC / 100),
+            "tp2": last_close * (1 + (PULLBACK_TP_PC * 2) / 100)
         }
         
-    # 2. سیگنال LONG استاد (برخورد به حمایت پایین + حجم فرسوده + رد قیمت)
-    near_support = last["low"] <= support_level * 1.008
-    if near_support and (is_pinbar_long or last["close"] > prev["high"]) and is_exhaustion_vol:
-        entry = last["close"]
-        sl = entry * (1 - SENSEI_SL_PCT)
-        tp1 = entry * (1 + SENSEI_TP1_PCT)
-        tp2 = entry * (1 + SENSEI_TP2_PCT)
+    # پولبک به باند بالا -> شورت
+    if prev_close >= upper.iloc[-2] and last_close < last_upper:
+        if symbol in SPOT_ONLY_MARKETS:
+            return None
         return {
-            "strategy": "SENSEI",
-            "type": "LONG",
-            "entry": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "reason": "حمایت استاد + حجم فرسوده + رد قیمت (Long)"
+            "type": "SHORT",
+            "strategy": "🚀 روش خودمان | روند",
+            "entry": last_close,
+            "sl": last_close * (1 + PULLBACK_SL_PC / 100),
+            "tp1": last_close * (1 - PULLBACK_TP_PC / 100),
+            "tp2": last_close * (1 - (PULLBACK_TP_PC * 2) / 100)
         }
         
     return None
 
-# ================= استراتژی ۲: روش خودمان (TREND - موج‌سواری و پولبک) =================
-def check_trend_strategy(df, symbol, btc_trend):
-    """
-    روش خودمان: پولبک به میانگین / باندهای بولینگر همراه با روند کلی
-    """
-    if df is None or len(df) < BB_PERIOD + 5:
-        return None
-        
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    # فیلتر روند بیت‌کوین
-    if btc_trend == "BEARISH":
-        # در بازار نزولی بیت‌کوین، ترجیحاً شورت یا فیلتر سخت‌گیرانه لانگ
-        pass
-    
-    # بررسی پولبک لانگ: قیمت به باند پایین یا نزدیک SMA خورده و برمی‌گشته
-    is_long_pullback = (prev["low"] <= prev["lower_bb"]) and (last["close"] > prev["open"]) and (last["volume"] > last["volume_sma"])
-    if is_long_pullback and btc_trend != "BEARISH":
-        entry = last["close"]
-        sl = entry * (1 - PULLBACK_SL_PCT)
-        tp1 = entry * (1 + PULLBACK_TP1_PCT)
-        tp2 = entry * (1 + PULLBACK_TP2_PCT)
-        return {
-            "strategy": "TREND",
-            "type": "LONG",
-            "entry": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "reason": "پولبک باند بولینگر + تایید حجم (Long)"
-        }
-        
-    # بررسی پولبک شورت: قیمت به باند بالا خورده و ریخته
-    is_short_pullback = (prev["high"] >= prev["upper_bb"]) and (last["close"] < prev["open"]) and (last["volume"] > last["volume_sma"])
-    if is_short_pullback and btc_trend != "BULLISH":
-        entry = last["close"]
-        sl = entry * (1 + PULLBACK_SL_PCT)
-        tp1 = entry * (1 - PULLBACK_TP1_PCT)
-        tp2 = entry * (1 - PULLBACK_TP2_PCT)
-        return {
-            "strategy": "TREND",
-            "type": "SHORT",
-            "entry": entry,
-            "sl": sl,
-            "tp1": tp1,
-            "tp2": tp2,
-            "reason": "پولبک باند بولینگر بالایی + ریزش حجم (Short)"
-        }
-        
-    return None
-
-# ================= مدیریت پوزیشن‌ها و ارسال سیگنال =================
-def manage_positions_and_scan():
+# ================= حلقه اصلی ربات =================
+def scan_markets():
+    print(f"[{datetime.now(timezone.utc)}] Scan started...")
     symbols = get_bitpin_markets()
-    if not symbols:
-        return
-        
-    btc_trend = get_btc_trend()
+    btc_price = get_bitcoin_price()
     
     for symbol in symbols:
-        # دریافت داده‌های تایم‌فریم اصلی (مثلا 1 ساعته برای دقت بیشتر)
-        df = get_ohlcv(symbol, resolution="60", count=60)
-        if df is None or len(df) < 30:
-            continue
-            
-        df = calculate_indicators(df)
-        
-        with positions_lock:
-            if symbol in active_positions:
-                # مدیریت پوزیشن باز (بررسی TP و SL)
-                pos = active_positions[symbol]
-                current_price = df.iloc[-1]["close"]
+        df = fetch_ohlcv(symbol)
+        if df is not None:
+            # ۱. اولویت با روش استاد
+            signal = check_sensei_strategy(df, symbol)
+            if not signal:
+                # ۲. اگر روش استاد سیگنال نداد، بررسی روش خودمان
+                signal = check_trend_strategy(df, symbol)
                 
-                if pos["type"] == "LONG":
-                    if current_price >= pos["tp2"]:
-                        send_telegram_message(f"🏆 **تارگت ۲ لمس شد (بستن کامل پوزیشن)**\nارز: `{symbol}`\nقیمت: `{current_price}`")
-                        del active_positions[symbol]
-                    elif current_price <= pos["sl"]:
-                        send_telegram_message(f"❌ **حد ضرر (SL) فعال شد**\nارز: `{symbol}`\nقیمت: `{current_price}`")
-                        del active_positions[symbol]
-                elif pos["type"] == "SHORT":
-                    if current_price <= pos["tp2"]:
-                        send_telegram_message(f"🏆 **تارگت ۲ لمس شد (بستن کامل پوزیشن)**\nارز: `{symbol}`\nقیمت: `{current_price}`")
-                        del active_positions[symbol]
-                    elif current_price >= pos["sl"]:
-                        send_telegram_message(f"❌ **حد ضرر (SL) فعال شد**\nارز: `{symbol}`\nقیمت: `{current_price}`")
-                        del active_positions[symbol]
-                continue
+            if signal:
+                btc_text = f"₿ بیت‌کوین: <b>${btc_price:,.2f}</b>\n" if btc_price > 0 else ""
+                msg = (
+                    f"🚨 <b>سیگنال جدید معاملاتی</b>\n\n"
+                    f"{btc_text}"
+                    f" ارزی: <b>{symbol}</b>\n"
+                    f" استراتژی: <b>{signal['strategy']}</b>\n"
+                    f" جهت: <b>{signal['type']}</b>\n"
+                    f" نقطه ورود: <code>{signal['entry']}</code>\n"
+                    f" حد ضرر (SL): <code>{signal['sl']:.4f}</code>\n"
+                    f" حد سود ۱ (TP1): <code>{signal['tp1']:.4f}</code>\n"
+                    f" حد سود ۲ (TP2): <code>{signal['tp2']:.4f}</code>\n"
+                    f"⏰ زمان: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC"
+                )
+                send_telegram_message(msg)
+        time.sleep(0.5) # تاخیر برای جلوگیری از محدودیت نرخ صرافی
 
-        # اگر پوزیشنی روی این ارز نداریم، بررسی استراتژی‌ها
-        # **اولویت اول: روش استاد (SENSEI)**
-        signal = check_sensei_strategy(df, symbol)
-        
-        # **اولویت دوم: روش خودمان (TREND)** اگر روش استاد سیگنالی نداد
-        if not signal:
-            signal = check_trend_strategy(df, symbol, btc_trend)
-            
-        if signal:
-            with positions_lock:
-                active_positions[symbol] = signal
-                
-            # تفکیک برچسب سیگنال‌ها بر اساس درخواست شما
-            if signal["strategy"] == "SENSEI":
-                header = "🎯 روش استاد | بازگشتی"
-            else:
-                header = "🚀 روش خودمان | روند"
-                
-            msg = (
-                f"{header}\n\n"
-                f"💎 نماد: `{symbol}`\n"
-                f"📌 جهت پوزیشن: `{signal['type']}` (اهرم {LEVERAGE}x)\n"
-                f"📥 قیمت ورود: `{signal['entry']:.4f}`\n"
-                f"🛑 حد ضرر (SL): `{signal['sl']:.4f}`\n"
-                f"🎯 تارگت اول (TP1): `{signal['tp1']:.4f}`\n"
-                f"🎯 تارگت دوم (TP2): `{signal['tp2']:.4f}`\n"
-                f"💡 دلیل: {signal['reason']}"
-            )
-            send_telegram_message(msg)
-
-        time.sleep(0.5)  # جلوگیری از فشار روی API
-
-def bot_loop():
-    send_telegram_message("🤖 **ربات معامله‌گری بیت‌پین با موفقیت روشن شد و شروع به اسکن بازار کرد.**")
+def main_loop():
     while True:
         try:
-            manage_positions_and_scan()
+            scan_markets()
         except Exception as e:
-            print(f"Error in main loop: {e}")
+            print(f"Main loop error: {e}")
         time.sleep(CHECK_INTERVAL)
 
-# ================= نقطه شروع برنامه =================
 if __name__ == "__main__":
-    # اجرای سرور HTTP در یک ترد جداگانه برای رندر
-    server_thread = threading.Thread(target=run_http_server, daemon=True)
-    server_thread.start()
+    # استارت سرور وب برای رندر در ترد جداگانه
+    t = threading.Thread(target=run_server)
+    t.daemon = True
+    t.start()
     
-    # اجرای حلقه اصلی ربات
-    bot_loop()
+    print("Bitpin Bot Started with BTC Dashboard Price...")
+    main_loop()
