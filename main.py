@@ -91,30 +91,29 @@ def send_telegram(message):
         print(f"Telegram Error: {e}")
         return False
 
-def get_btc_price():
+def get_market_price(symbol):
     headers = {"User-Agent": "Mozilla/5.0"}
-    for base in ("https://api.bitpin.ir/v1/mkt/markets/prices/", "https://api.bitpin.org/v1/mkt/markets/prices/"):
-        try:
-            res = session.get(base, headers=headers, timeout=10)
-            if res.status_code == 200:
-                data = res.json()
-                items = data if isinstance(data, list) else data.get("results", [])
-                for t in items:
-                    if t.get("symbol") == "BTC_USDT":
-                        price = t.get("price")
-                        if price not in (None, "", "0"):
-                            return f"{float(price):,.2f}"
-        except Exception:
-            pass
-            
     try:
-        df = get_ohlc("BTC_USDT", resolution="60", count=2)
+        res = session.get("https://api.bitpin.org/v1/mkt/markets/", headers=headers, timeout=10)
+        if res.status_code == 200:
+            data = res.json()
+            markets = data.get("results", []) if isinstance(data, dict) else data
+            for m in markets:
+                if m.get("symbol") == symbol:
+                    price = m.get("price")
+                    if price not in (None, "", "0"):
+                        return f"{float(price):,.2f}"
+    except Exception:
+        pass
+        
+    try:
+        df = get_ohlc(symbol, resolution="60", count=2)
         if df is not None and not df.empty:
             return f"{float(df.iloc[-1]['close']):,.2f}"
     except Exception:
         pass
         
-    return "به‌روزرسانی خودکار"
+    return "نامعتبر"
 
 def get_ohlc(symbol, resolution="60", count=350):
     try:
@@ -252,10 +251,8 @@ def check_trend_strategy(symbol, df):
 def bot_worker():
     print("🤖 ربات ترید تتری بیت‌پین شروع شد...")
     
-    # تست سلامت اولیه و گرفتن قیمت لحظه‌ای بیت‌کوین و اتریوم برای اطمینان خاطر
-    btc_p = get_btc_price()
-    eth_df = get_ohlc("ETH_USDT", resolution="60", count=2)
-    eth_p = f"{float(eth_df.iloc[-1]['close']):,.2f}" if eth_df is not None and not eth_df.empty else "نامعتبر"
+    btc_p = get_market_price("BTC_USDT")
+    eth_p = get_market_price("ETH_USDT")
     
     startup_msg = (
         f"🤖 *ربات ترید تتری (۱۰۰ تعهدی + ۲۰ اسپات) روشن شد.*\n"
