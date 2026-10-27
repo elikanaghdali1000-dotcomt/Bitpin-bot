@@ -317,6 +317,104 @@ def check_trend_strategy(df, market_code, is_margin=True):
 
     return None
 
+# ================= استراتژی پولبک پس از شکست سطح =================
+def check_pullback_strategy(df, market_code, is_margin=True):
+    """
+    شکست سقف/کف ۲۵ کندل با حجم بالاتر از ۱.۵ برابر میانگین ۲۰ کندل،
+    بازگشت به سطح طی ۱ تا ۸ کندل با حجم کمتر، و تأیید در آخرین کندل بسته‌شده.
+    """
+    if len(df) < 55:
+        return None
+
+    sig_index = len(df) - 2
+    sig_candle = df.iloc[sig_index]
+    previous_candle = df.iloc[sig_index - 1]
+    atr = sig_candle["atr"]
+
+    if pd.isna(atr) or atr <= 0:
+        return None
+
+    # آخرین شکست معتبر را زودتر بررسی می‌کند.
+    for breakout_index in range(sig_index - 2, max(24, sig_index - 10), -1):
+        prior_25 = df.iloc[breakout_index - 25:breakout_index]
+        prior_20_volume = df.iloc[breakout_index - 20:breakout_index]["volume"].mean()
+        breakout = df.iloc[breakout_index]
+        pullback = df.iloc[breakout_index + 1:sig_index]
+
+        if (
+            len(prior_25) != 25
+            or len(pullback) < 1
+            or len(pullback) > 8
+            or pd.isna(prior_20_volume)
+            or prior_20_volume <= 0
+            or breakout["volume"] <= 1.5 * prior_20_volume
+            or pullback["volume"].mean() >= prior_20_volume
+        ):
+            continue
+
+        ema_now = sig_candle["ema200"]
+        ema_five_candles_ago = df.iloc[sig_index - 5]["ema200"]
+        if pd.isna(ema_now) or pd.isna(ema_five_candles_ago):
+            continue
+
+        tolerance = 0.3 * atr
+
+        # پولبک لانگ: شکست مقاومت و بازگشت به سطح شکسته‌شده
+        resistance = prior_25["high"].max()
+        if (
+            breakout["close"] > resistance
+            and sig_candle["close"] > ema_now > ema_five_candles_ago
+            and ((pullback["low"] - resistance).abs() <= tolerance).any()
+            and (pullback["close"] >= resistance - tolerance).all()
+            and sig_candle["close"] > resistance
+            and sig_candle["close"] > previous_candle["high"]
+        ):
+            entry = sig_candle["close"]
+            sl = min(pullback["low"].min(), sig_candle["low"]) - (0.2 * atr)
+            risk = entry - sl
+
+            if risk > 0:
+                tp = entry + (2 * risk)
+                market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات (فقط خرید)"
+                return (
+                    f"📈 <b>سیگنال لانگ پولبک پس از شکست</b>\n"
+                    f"▫️ ارز: <code>{market_code}</code> ({market_type_str})\n"
+                    f"▫️ تایم‌فریم: <b>15 دقیقه</b>\n"
+                    f"▫️ قیمت ورود: {entry:,.4f}\n"
+                    f"▫️ سطح شکسته‌شده: {resistance:,.4f}\n"
+                    f"🛡 حد ضرر (SL): {sl:,.4f}\n"
+                    f"🎯 حد سود (2R): {tp:,.4f}"
+                )
+
+        # پولبک شورت فقط برای نمادهای مارجین
+        support = prior_25["low"].min()
+        if (
+            is_margin
+            and breakout["close"] < support
+            and sig_candle["close"] < ema_now < ema_five_candles_ago
+            and ((pullback["high"] - support).abs() <= tolerance).any()
+            and (pullback["close"] <= support + tolerance).all()
+            and sig_candle["close"] < support
+            and sig_candle["close"] < previous_candle["low"]
+        ):
+            entry = sig_candle["close"]
+            sl = max(pullback["high"].max(), sig_candle["high"]) + (0.2 * atr)
+            risk = sl - entry
+
+            if risk > 0:
+                tp = entry - (2 * risk)
+                return (
+                    f"📉 <b>سیگنال شورت پولبک پس از شکست</b>\n"
+                    f"▫️ ارز: <code>{market_code}</code> (تعهدی / مارجین)\n"
+                    f"▫️ تایم‌فریم: <b>15 دقیقه</b>\n"
+                    f"▫️ قیمت ورود: {entry:,.4f}\n"
+                    f"▫️ سطح شکسته‌شده: {support:,.4f}\n"
+                    f"🛡 حد ضرر (SL): {sl:,.4f}\n"
+                    f"🎯 حد سود (2R): {tp:,.4f}"
+                )
+
+    return None
+
 # ================= حلقه اصلی پایش و اسکن بازار =================
 def run_scanner():
     print("Market scanner started successfully.")
@@ -359,6 +457,13 @@ def run_scanner():
                         if trend_msg:
                             send_telegram(trend_msg)
                             time.sleep(1)
+
+                        # ۳. بررسی استراتژی پولبک، فقط اگر روند سیگنال نداده باشد
+                        if not trend_msg:
+                            pullback_msg = check_pullback_strategy(df, symbol, is_margin=is_margin)
+                            if pullback_msg:
+                                send_telegram(pullback_msg)
+                                time.sleep(1)
 
                         time.sleep(0.4)
 
