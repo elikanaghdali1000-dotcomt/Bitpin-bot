@@ -192,7 +192,6 @@ def check_sensi_strategy(df, market_code, is_margin=True):
     sig_candle = df.iloc[-2]
     lookback_window = df.iloc[-27:-2]
     prior_support = lookback_window["low"].min()
-    prior_resistance = lookback_window["high"].max()
 
     current_vol = sig_candle["volume"]
     vol_ma20 = sig_candle["vol_ma20"]
@@ -227,24 +226,47 @@ def check_trend_strategy(df, market_code, is_margin=True):
     if pd.isna(atr): atr = c * 0.01
 
     if c <= lower and c > ema and rsi < 35:
-        return f"🟢 <b>سیگنال لانگ بولینگر</b>\n▫️ ارز: <code>{market_code}</code>\n▫️ ورود: {c:,.4f}\n▫️ RSI: {rsi:.1f}"
+        market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
+        return f"🟢 <b>سیگنال لانگ بولینگر (روند)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n▫️ ورود: {c:,.4f}\n▫️ RSI: {rsi:.1f}"
     return None
 
 def check_pullback_strategy(df, market_code, is_margin=True):
-    return None # فعلا جهت تست سریع فشرده شده
+    if len(df) < 200:
+        return None
+    last = df.iloc[-2]
+    c, ema, rsi, atr = last["close"], last["ema200"], last["rsi"], last["atr"]
+    if pd.isna(ema) or pd.isna(atr): 
+        return None
+
+    # شرط پولبک به میانگین متحرک 200 در روند صعودی و تاییدیه بازگشت
+    is_uptrend = c > ema
+    near_ema = (last["low"] <= ema * 1.015) and (last["low"] >= ema * 0.985)
+    is_bounce = last["close"] > last["open"] and last["close"] > ema
+
+    if is_uptrend and near_ema and is_bounce and (40 <= rsi <= 65):
+        entry = c
+        sl = ema - (1.5 * atr)
+        risk = entry - sl
+        if risk > 0:
+            tp1 = entry + (2 * risk)
+            market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
+            return f"📈 <b>سیگنال پولبک به EMA200 (ادامه روند)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود: {tp1:,.4f}"
+    return None
 
 # ================= حلقه اصلی پایش و اسکن بازار =================
 def run_scanner():
     print("Market scanner started successfully.")
     
-    test_msg = (
-        "🚀 <b>ربات اسکنر بیت‌پین (حالت دیباگ) روشن شد!</b>\n\n"
+    # پیام روشن شدن اولیه ربات
+    startup_msg = (
+        "🚀 <b>ربات اسکنر بیت‌پین (با ۳ استراتژی فعال) روشن شد!</b>\n\n"
         "✅ اتصال به تلگرام برقرار است.\n"
-        " USDT 🔗 ارزهای پایه: \n"
-        "⏱ به محض رسیدن دقیقه ۰۱، اولین تست دریافت کندل انجام خواهد شد."
+        "🔗 پایش ۱۲۰ ارز (مارجین و اسپات USDT)\n"
+        "⏱ ربات در حال رصد بازار در تایم‌فریم ۱۵ دقیقه است..."
     )
-    send_telegram(test_msg)
+    send_telegram(startup_msg)
 
+    first_run_done = False
     last_scanned_candle_time = None
 
     while True:
@@ -264,41 +286,51 @@ def run_scanner():
                     total_checked = 0
                     signals_found = 0
 
-                    for item in ALL_WATCHLIST[:10]: # برای تست سریع، ۱۰ ارز اول رو چک می‌کنه تا ببینیم دیتا میاد یا نه
+                    for item in ALL_WATCHLIST:
                         symbol = item["symbol"]
                         is_margin = item["is_margin"]
                         total_checked += 1
 
-                        df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=100)
+                        df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=220)
                         if df is not None and not df.empty:
                             success_count += 1
                             df = calculate_indicators(df)
                             if df is not None:
+                                # چک کردن استراتژی ۱: سنسی
                                 sensi_msg = check_sensi_strategy(df, symbol, is_margin=is_margin)
                                 if sensi_msg:
                                     send_telegram(sensi_msg)
                                     signals_found += 1
                                     continue
 
+                                # چک کردن استراتژی ۲: بولینگر روند
                                 trend_msg = check_trend_strategy(df, symbol, is_margin=is_margin)
                                 if trend_msg:
                                     send_telegram(trend_msg)
                                     signals_found += 1
+                                    continue
+
+                                # چک کردن استراتژی ۳: پولبک EMA200
+                                pullback_msg = check_pullback_strategy(df, symbol, is_margin=is_margin)
+                                if pullback_msg:
+                                    send_telegram(pullback_msg)
+                                    signals_found += 1
 
                         time.sleep(0.3)
 
-                    # گزارش دیباگ به تلگرام در اولین اسکن
-                    debug_report = (
-                        f"📊 <b>گزارش تست سلامت ربات (دیباگ)</b>\n\n"
-                        f"▫️ تعداد کل ارزهای بررسی‌شده در تست: {total_checked}\n"
-                        f"▫️ دریافت موفق کندل از بیت‌پین: <b>{success_count} ارز</b>\n"
-                        f"▫️ سیگنال‌های یافت شده: {signals_found}\n\n"
-                        f"✅ <i>ارتباط API و منطق ربات کاملاً فعال است و بدون خطا کار می‌کند.</i>"
-                    )
-                    send_telegram(debug_report)
+                    # گزارش تست سلامت فقط در دور اول اسکن ارسال می‌شود و بعد از آن دیگر تکرار نخواهد شد
+                    if not first_run_done:
+                        debug_report = (
+                            f"📊 <b>گزارش تست سلامت اولیه ربات</b>\n\n"
+                            f"▫️ تعداد کل ارزهای بررسی‌شده: {total_checked}\n"
+                            f"▫️ دریافت موفق کندل از بیت‌پین: <b>{success_count} ارز</b>\n\n"
+                            f"✅ <i>ربات با موفقیت فعال شد و از این به بعد فقط با ارسال سیگنال‌ها پیام خواهد داد.</i>"
+                        )
+                        send_telegram(debug_report)
+                        first_run_done = True
 
                     last_scanned_candle_time = current_candle_id
-                    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Scan & Debug finished.")
+                    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Scan finished.")
 
             time.sleep(CHECK_INTERVAL)
 
