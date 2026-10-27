@@ -320,8 +320,6 @@ def run_scanner():
     while True:
         try:
             now = datetime.now(timezone.utc)
-            # بررسی در ابتدای هر ۱۵ دقیقه (دقیقه ۰، ۱۵، ۳۰، ۴۵)
-            # برای اطمینان از بسته شدن کامل کندل، در دقایق ۱، ۱۶، ۳۱، ۴۶ اسکن شروع می‌شود
             current_minute = now.minute
             candle_index = current_minute // 15
             target_start_minute = candle_index * 15 + 1
@@ -347,3 +345,33 @@ def run_scanner():
                         # ۱. بررسی استراتژی سنسی (اولویت اول)
                         sensi_msg = check_sensi_strategy(df, symbol, is_margin=is_margin)
                         if sensi_msg:
+                            send_telegram(sensi_msg)
+                            time.sleep(1)
+                            continue
+
+                        # ۲. بررسی استراتژی روند
+                        trend_msg = check_trend_strategy(df, symbol, is_margin=is_margin)
+                        if trend_msg:
+                            send_telegram(trend_msg)
+                            time.sleep(1)
+
+                        time.sleep(0.4)
+
+                    last_scanned_candle_time = current_candle_id
+                    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Scan finished.")
+
+            time.sleep(CHECK_INTERVAL)
+
+        except Exception as e:
+            print(f"Loop error: {e}")
+            time.sleep(10)
+
+# ================= نقطه اجرای برنامه =================
+if __name__ == "__main__":
+    server_thread = threading.Thread(target=run_http_server, daemon=True)
+    server_thread.start()
+
+    ping_thread = threading.Thread(target=self_ping, daemon=True)
+    ping_thread.start()
+
+    run_scanner()
