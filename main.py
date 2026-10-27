@@ -14,7 +14,6 @@ APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 BASE_API = "https://api.bitpin.org/api"
 OHLC_URL = f"{BASE_API}/v1/mkt/tv/history/"
-TICKERS_URL = "https://api.bitpin.org/v1/mkt/tickers/"
 
 BB_PERIOD = 20
 BB_STD = 2.0
@@ -74,12 +73,9 @@ SPOT_ONLY_MARKETS = [
     "PERP_USDT", "UNFI_USDT", "OXT_USDT", "CELO_USDT", "AUDIO_USDT"
 ]
 
-# تمام ۱۲۰ نمادی که ربات پایش می‌کند
 ALL_SYMBOLS = MARGIN_SYMBOLS + SPOT_ONLY_MARKETS
-
 SENT_KEYS = set()
 
-# سشن با قابلیت Retry خودکار
 session = requests.Session()
 adapter = requests.adapters.HTTPAdapter(max_retries=3)
 session.mount("https://", adapter)
@@ -96,39 +92,31 @@ def send_telegram(message):
         return False
 
 def get_btc_price():
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"}
+    headers = {"User-Agent": "Mozilla/5.0"}
+    # ۱. ابتدا بررسی از طریق API قیمت‌های بازار بیت‌پین
     for base in ("https://api.bitpin.ir/v1/mkt/markets/prices/", "https://api.bitpin.org/v1/mkt/markets/prices/"):
         try:
-            res = requests.get(base, headers=headers, timeout=10)
+            res = session.get(base, headers=headers, timeout=10)
             if res.status_code == 200:
                 data = res.json()
-                if isinstance(data, list):
-                    for t in data:
-                        if t.get("symbol") == "BTC_USDT":
-                            price = t.get("price")
-                            if price not in (None, "", "0"):
-                                return f"{float(price):,.2f}"
-        except:
-            pass
-    try:
-        res = requests.get("https://api.bitpin.ir/v1/mkt/markets/prices/", headers=headers, timeout=10)
-        if res.status_code == 200:
-            data = res.json()
-            if isinstance(data, list):
-                for t in data:
-                    if t.get("symbol") == "BTC_IRT":
+                items = data if isinstance(data, list) else data.get("results", [])
+                for t in items:
+                    if t.get("symbol") == "BTC_USDT":
                         price = t.get("price")
                         if price not in (None, "", "0"):
-                            return f"{float(price):,.2f} تومان"
-    except:
-        pass
+                            return f"{float(price):,.2f}"
+        except Exception:
+            pass
+            
+    # ۲. فال‌بک مطمئن از طریق کندل‌های تاریخی خود بیت‌پین بدون وابستگی به دامنه خاص
     try:
         df = get_ohlc("BTC_USDT", resolution="60", count=2)
         if df is not None and not df.empty:
             return f"{float(df.iloc[-1]['close']):,.2f}"
-    except:
+    except Exception:
         pass
-    return "نامشخص"
+        
+    return "به‌روزرسانی خودکار"
 
 def get_ohlc(symbol, resolution="60", count=350):
     try:
@@ -165,26 +153,20 @@ def compute_indicators(df):
     if len(df) < max(EMA_TREND_PERIOD, BB_PERIOD, ATR_PERIOD, RSI_PERIOD) + 10:
         return None
     
-    # باندهای بولینگر
     sma = df["close"].rolling(window=BB_PERIOD).mean()
     std = df["close"].rolling(window=BB_PERIOD).std()
     df["bb_upper"] = sma + (std * BB_STD)
     df["bb_lower"] = sma - (std * BB_STD)
     
-    # فیلتر روند ماکرو ۲۰۰ ساعته
     df["ema_200"] = df["close"].ewm(span=EMA_TREND_PERIOD, adjust=False).mean()
-    
-    # میانگین حجم ۲۰ کندل (معیار حجم نرمال)
     df["vol_sma"] = df["volume"].rolling(20).mean()
     
-    # ATR برای حد ضرر و سود داینامیک
     high_low = df["high"] - df["low"]
     high_close = (df["high"] - df["close"].shift()).abs()
     low_close = (df["low"] - df["close"].shift()).abs()
     tr = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
     df["atr"] = tr.rolling(window=ATR_PERIOD).mean()
     
-    # RSI با ایمنی در برابر تقسیم بر صفر
     delta = df["close"].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=RSI_PERIOD).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=RSI_PERIOD).mean()
@@ -194,16 +176,13 @@ def compute_indicators(df):
     return df
 
 def check_sensei_strategy(symbol, df):
-    """روش سنسی / پولبک به حمایت با شرط حجم خشک (Dry Volume)"""
     if len(df) < 30:
         return
     
     last = df.iloc[-1]
     prev = df.iloc[-2]
-    
     support = df['low'].iloc[-26:-4].min()
     
-    # شرط حجم خشک: حجم کندل پولبک پایین‌تر یا مساوی ۷۰ درصد میانگین حجم باشد
     is_dry_volume = last["volume"] <= (last["vol_sma"] * 0.7)
     
     if prev["close"] <= support * 1.005 and last["close"] > support and is_dry_volume:
@@ -224,7 +203,6 @@ def check_sensei_strategy(symbol, df):
                 SENT_KEYS.add(key)
 
 def check_trend_strategy(symbol, df):
-    """روش بولینگر + RSI + تایید حجم نرمال و تفکیک مارکت تعهدی/اسپات"""
     if len(df) < 30:
         return
         
@@ -238,7 +216,6 @@ def check_trend_strategy(symbol, df):
     vol_normal = last["volume"] >= (last["vol_sma"] * 0.7)
     is_spot_only = symbol in SPOT_ONLY_MARKETS
     
-    # --- سیگنال لانگ ---
     if prev["close"] <= prev["bb_lower"] and last["close"] > last["bb_lower"]:
         if last["close"] > ema_val and rsi_val < 45 and vol_normal:
             key = f"{symbol}_trend_long_{int(last['time'])}"
@@ -257,7 +234,6 @@ def check_trend_strategy(symbol, df):
                 if send_telegram(msg):
                     SENT_KEYS.add(key)
 
-    # --- سیگنال شورت ---
     elif prev["close"] >= prev["bb_upper"] and last["close"] < prev["bb_upper"] and not is_spot_only:
         if last["close"] < ema_val and rsi_val > 55 and vol_normal:
             key = f"{symbol}_trend_short_{int(last['time'])}"
@@ -301,7 +277,6 @@ def bot_worker():
             print(f"Main loop error: {e}")
             time.sleep(60)
 
-# ================= سرور سلامت برای Render (با پشتیبانی از HEAD برای رفع خطای لاگ) =================
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
