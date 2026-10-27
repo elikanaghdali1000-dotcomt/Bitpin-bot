@@ -94,13 +94,15 @@ def send_telegram(message):
 def get_market_price(symbol):
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        res = session.get("https://api.bitpin.org/v1/mkt/markets/", headers=headers, timeout=10)
+        res = session.get("https://api.bitpin.org/api/v1/mkt/tickers/", headers=headers, timeout=10)
         if res.status_code == 200:
             data = res.json()
             markets = data.get("results", []) if isinstance(data, dict) else data
             for m in markets:
-                if m.get("symbol") == symbol:
-                    price = m.get("price")
+                # سازگار با ساختارهای مختلف پاسخ تیکرها در بیت‌پین (مثل symbol یا market)
+                sym = m.get("symbol") or m.get("market", {}).get("symbol")
+                if sym == symbol:
+                    price = m.get("price") or m.get("last_price") or m.get("market", {}).get("price")
                     if price not in (None, "", "0"):
                         return f"{float(price):,.2f}"
     except Exception:
