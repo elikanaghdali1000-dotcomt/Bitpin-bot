@@ -8,8 +8,13 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = os.getenv("8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo")
-TELEGRAM_CHAT_ID = os.getenv("6643451227")
+# 👇 توکن بات تلگرام دریافتی از BotFather را داخل گیومه زیر قرار دهید (مثل 123456789:ABCdefGhI...)
+TELEGRAM_BOT_TOKEN = os.getenv("8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo", "اینجا_توکن_ربات_تلگرام_را_بگذارید")
+
+# 👇 چت‌آیدی عددی تلگرام خود را داخل گیومه زیر قرار دهید
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
+
+# آدرس وب‌سرویس شما در رندر
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 BASE_API = "https://api.bitpin.org/api"
