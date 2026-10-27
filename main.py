@@ -9,7 +9,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
 # 👇 توکن بات تلگرام خود را داخل گیومه دوم بگذارید (مثل "123456789:ABCdefGhI...")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "توکن_بات_خودت_را_اینجا_بگذار")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo")
 
 # 👇 چت‌آیدی عددی تلگرام خود را داخل گیومه دوم بگذارید
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
@@ -18,7 +18,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 BASE_API = "https://api.bitpin.org/api"
-OHLC_URL = f"{BASE_API}/v1/mkt/tv/history/"
+OHLC_URL = f"{BASE_API}/v1/mkt/candles/"  # 👈 اصلاح شده مطابق مستندات بیت‌پین
 
 BB_PERIOD = 20
 BB_STD = 2.0
@@ -96,8 +96,8 @@ def self_ping():
 
 # ================= ارسال پیام به تلگرام =================
 def send_telegram(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_BOT_TOKEN == "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo":
-        print("Telegram tokens not set!")
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_BOT_TOKEN == "توکن_بات_خودت_را_اینجا_بگذار":
+        print("[Telegram] Token not set!")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -107,11 +107,15 @@ def send_telegram(text):
         "disable_web_page_preview": True
     }
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        if r.status_code != 200:
+            print(f"[Telegram Error] status: {r.status_code}, response: {r.text}")
+        else:
+            print("[Telegram] Message sent successfully.")
     except Exception as e:
-        print(f"Telegram error: {e}")
+        print(f"[Telegram Exception] {e}")
 
-# ================= دریافت کندل‌ها از بیت‌پین =================
+# ================= دریافت کندل‌ها از بیت‌پین (مطابق مستندات) =================
 def fetch_bitpin_candles(market_code, resolution=TIMEFRAME, count=100):
     try:
         now_ts = int(time.time())
@@ -120,7 +124,7 @@ def fetch_bitpin_candles(market_code, resolution=TIMEFRAME, count=100):
 
         params = {
             "symbol": market_code,
-            "resolution": resolution,
+            "res": resolution,  # 👈 پارامتر درست در مستندات بیت‌پین res است
             "from": from_ts,
             "to": now_ts
         }
@@ -131,19 +135,38 @@ def fetch_bitpin_candles(market_code, resolution=TIMEFRAME, count=100):
             return None
             
         data = r.json()
-        if not data or data.get("s") != "ok":
-            return None
+        
+        # ساختار خروجی اندپوينت candles معمولاً لیستی از کندل‌هاست
+        if not data or not isinstance(data, list):
+            # اگر به صورت دیکشنری یا فرمت خاصی بود
+            if isinstance(data, dict) and "output" in data:
+                data = data["output"]
+            else:
+                return None
+
+        # تبدیل لیست دیکشنری‌های کندل به دیتافریم
+        # فرمت خروجی استاندارد بیت‌پین برای candles: [ {time, open, high, low, close, volume}, ... ] یا آرایه‌های جداگانه
+        timestamps, opens, highs, lows, closes, volumes = [], [], [], [], [], []
+        
+        for c in data:
+            timestamps.append(int(c.get("time", c.get("t", 0))))
+            opens.append(float(c.get("open", c.get("o", 0))))
+            highs.append(float(c.get("high", c.get("h", 0))))
+            lows.append(float(c.get("low", c.get("l", 0))))
+            closes.append(float(c.get("close", c.get("c", 0))))
+            volumes.append(float(c.get("volume", c.get("v", 0))))
 
         df = pd.DataFrame({
-            "timestamp": data["t"],
-            "open": [float(x) for x in data["o"]],
-            "high": [float(x) for x in data["h"]],
-            "low": [float(x) for x in data["l"]],
-            "close": [float(x) for x in data["c"]],
-            "volume": [float(x) for x in data["v"]]
+            "timestamp": timestamps,
+            "open": opens,
+            "high": highs,
+            "low": lows,
+            "close": closes,
+            "volume": volumes
         })
         return df
-    except Exception:
+    except Exception as e:
+        print(f"Candle fetch error for {market_code}: {e}")
         return None
 
 # ================= محاسبه اندیکاتورها =================
@@ -151,26 +174,20 @@ def calculate_indicators(df):
     if df is None or len(df) < 55:
         return None
 
-    # بولینگر بندز
     df["bb_middle"] = df["close"].rolling(window=BB_PERIOD).mean()
     df["bb_std"] = df["close"].rolling(window=BB_PERIOD).std()
     df["bb_upper"] = df["bb_middle"] + (BB_STD * df["bb_std"])
     df["bb_lower"] = df["bb_middle"] - (BB_STD * df["bb_std"])
 
-    # میانگین متحرک 200
     df["ema200"] = df["close"].ewm(span=200, adjust=False).mean()
-
-    # میانگین حجم 20
     df["vol_ma20"] = df["volume"].rolling(window=20).mean()
 
-    # RSI
     delta = df["close"].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
     rs = gain / loss
     df["rsi"] = 100 - (100 / (1 + rs))
 
-    # ATR (14)
     high_low = df["high"] - df["low"]
     high_close = (df["high"] - df["close"].shift()).abs()
     low_close = (df["low"] - df["close"].shift()).abs()
@@ -179,7 +196,7 @@ def calculate_indicators(df):
 
     return df
 
-# ================= استراتژی اختصاصی سنسی (لانگ و شورت) =================
+# ================= استراتژی سنسی =================
 def check_sensi_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
         return None
@@ -202,7 +219,6 @@ def check_sensi_strategy(df, market_code, is_margin=True):
     if pd.isna(atr) or atr == 0:
         atr = sig_candle["close"] * 0.005
 
-    # سناریو ۱: لانگ
     near_support = (
         (sig_candle["low"] <= prior_support * 1.003) and 
         (sig_candle["low"] >= prior_support * 0.992)
@@ -232,7 +248,6 @@ def check_sensi_strategy(df, market_code, is_margin=True):
                 f"🎯 <b>حد سود ۲ (2.5R):</b> {tp2:,.4f}"
             )
 
-    # سناریو ۲: شورت
     if is_margin:
         near_resistance = (
             (sig_candle["high"] >= prior_resistance * 0.997) and 
@@ -264,7 +279,7 @@ def check_sensi_strategy(df, market_code, is_margin=True):
 
     return None
 
-# ================= استراتژی استاندارد روند و باند بولینگر =================
+# ================= استراتژی روند =================
 def check_trend_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
         return None
@@ -304,7 +319,7 @@ def check_trend_strategy(df, market_code, is_margin=True):
 
     return None
 
-# ================= استراتژی پولبک پس از شکست سطح =================
+# ================= استراتژی پولبک =================
 def check_pullback_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
         return None
@@ -396,6 +411,16 @@ def check_pullback_strategy(df, market_code, is_margin=True):
 # ================= حلقه اصلی پایش و اسکن بازار =================
 def run_scanner():
     print("Market scanner started successfully.")
+    
+    test_msg = (
+        "🚀 <b>ربات اسکنر بیت‌پین روشن شد!</b>\n\n"
+        "✅ اتصال به تلگرام برقرار است.\n"
+        "🔗 آدرس API کندل‌ها مطابق مستندات به‌روز شد.\n"
+        "⏱ تایم‌فریم: <b>15 دقیقه</b>\n"
+        "📊 در حال رصد ۱۲۰ ارز..."
+    )
+    send_telegram(test_msg)
+
     last_scanned_candle_time = None
 
     while True:
@@ -423,20 +448,17 @@ def run_scanner():
                         if df is None:
                             continue
 
-                        # ۱. بررسی استراتژی سنسی (اولویت اول)
                         sensi_msg = check_sensi_strategy(df, symbol, is_margin=is_margin)
                         if sensi_msg:
                             send_telegram(sensi_msg)
                             time.sleep(1)
                             continue
 
-                        # ۲. بررسی استراتژی روند
                         trend_msg = check_trend_strategy(df, symbol, is_margin=is_margin)
                         if trend_msg:
                             send_telegram(trend_msg)
                             time.sleep(1)
 
-                        # ۳. بررسی استراتژی پولبک
                         if not trend_msg:
                             pullback_msg = check_pullback_strategy(df, symbol, is_margin=is_margin)
                             if pullback_msg:
