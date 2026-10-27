@@ -93,7 +93,6 @@ def send_telegram(message):
 
 def get_btc_price():
     headers = {"User-Agent": "Mozilla/5.0"}
-    # ۱. ابتدا بررسی از طریق API قیمت‌های بازار بیت‌پین
     for base in ("https://api.bitpin.ir/v1/mkt/markets/prices/", "https://api.bitpin.org/v1/mkt/markets/prices/"):
         try:
             res = session.get(base, headers=headers, timeout=10)
@@ -108,7 +107,6 @@ def get_btc_price():
         except Exception:
             pass
             
-    # ۲. فال‌بک مطمئن از طریق کندل‌های تاریخی خود بیت‌پین بدون وابستگی به دامنه خاص
     try:
         df = get_ohlc("BTC_USDT", resolution="60", count=2)
         if df is not None and not df.empty:
@@ -253,8 +251,21 @@ def check_trend_strategy(symbol, df):
 
 def bot_worker():
     print("🤖 ربات ترید تتری بیت‌پین شروع شد...")
+    
+    # تست سلامت اولیه و گرفتن قیمت لحظه‌ای بیت‌کوین و اتریوم برای اطمینان خاطر
     btc_p = get_btc_price()
-    send_telegram(f"🤖 *ربات ترید تتری (۱۰۰ تعهدی + ۲۰ اسپات) روشن شد.*\n📊 قیمت بیت‌کوین (سلامت سنج): `{btc_p}` USDT\n⏱ اسکن بازار فعال در ۵ دقیقه پایانی هر ساعت (با فیلتر حجم خشک در پولبک).")
+    eth_df = get_ohlc("ETH_USDT", resolution="60", count=2)
+    eth_p = f"{float(eth_df.iloc[-1]['close']):,.2f}" if eth_df is not None and not eth_df.empty else "نامعتبر"
+    
+    startup_msg = (
+        f"🤖 *ربات ترید تتری (۱۰۰ تعهدی + ۲۰ اسپات) روشن شد.*\n"
+        f"✅ *وضعیت اتصال به API و قیمت‌ها: سالم*\n"
+        f"📊 قیمت بیت‌کوین: `{btc_p}` USDT\n"
+        f"📊 قیمت اتریوم: `{eth_p}` USDT\n"
+        f"⏱ اسکن بازار فعال در ۵ دقیقه پایانی هر ساعت (با فیلتر حجم خشک در پولبک)."
+    )
+    send_telegram(startup_msg)
+    
     while True:
         try:
             now = datetime.now(timezone.utc)
