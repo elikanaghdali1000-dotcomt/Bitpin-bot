@@ -8,10 +8,10 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-# 👇 توکن بات تلگرام دریافتی از BotFather را داخل گیومه زیر قرار دهید (مثل 123456789:ABCdefGhI...)
-TELEGRAM_BOT_TOKEN = os.getenv("8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo", "اینجا_توکن_ربات_تلگرام_را_بگذارید")
+# 👇 توکن بات تلگرام خود را داخل گیومه دوم بگذارید (مثل "123456789:ABCdefGhI...")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "توکن_بات_خودت_را_اینجا_بگذار")
 
-# 👇 چت‌آیدی عددی تلگرام خود را داخل گیومه زیر قرار دهید
+# 👇 چت‌آیدی عددی تلگرام خود را داخل گیومه دوم بگذارید
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
 
 # آدرس وب‌سرویس شما در رندر
@@ -96,7 +96,7 @@ def self_ping():
 
 # ================= ارسال پیام به تلگرام =================
 def send_telegram(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID or TELEGRAM_BOT_TOKEN == "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo":
         print("Telegram tokens not set!")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -181,18 +181,10 @@ def calculate_indicators(df):
 
 # ================= استراتژی اختصاصی سنسی (لانگ و شورت) =================
 def check_sensi_strategy(df, market_code, is_margin=True):
-    """
-    استراتژی سنسی دوطرفه (لانگ و شورت):
-    1. لانگ: رسیدن به کف 25 کندل اخیر با حجم خشکیده فروش + کندل برگشتی صعودی
-    2. شورت (فقط روی نمادهای تعهدی/مارجین): رسیدن به سقف 25 کندل اخیر با حجم خشکیده خرید + کندل برگشتی نزولی
-    """
     if len(df) < 55:
         return None
 
-    # بررسی روی آخرین کندل بسته‌شده (بدون ریپینت)
     sig_candle = df.iloc[-2]
-    
-    # بازه 25 کندل قبل از کندل سیگنال
     lookback_window = df.iloc[-27:-2]
     prior_support = lookback_window["low"].min()
     prior_resistance = lookback_window["high"].max()
@@ -204,13 +196,13 @@ def check_sensi_strategy(df, market_code, is_margin=True):
         return None
 
     vol_ratio = current_vol / vol_ma20
-    is_volume_dried = vol_ratio < 0.70  # حجم ۳۰٪ کمتر از میانگین (خشکی حجم)
+    is_volume_dried = vol_ratio < 0.70
 
     atr = sig_candle.get("atr", (sig_candle["high"] - sig_candle["low"]))
     if pd.isna(atr) or atr == 0:
         atr = sig_candle["close"] * 0.005
 
-    # ================== سناریو ۱: سیگنال لانگ در کف ==================
+    # سناریو ۱: لانگ
     near_support = (
         (sig_candle["low"] <= prior_support * 1.003) and 
         (sig_candle["low"] >= prior_support * 0.992)
@@ -228,7 +220,7 @@ def check_sensi_strategy(df, market_code, is_margin=True):
             tp1 = entry + (1.5 * risk)
             tp2 = entry + (2.5 * risk)
             market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات (فقط خرید)"
-            msg = (
+            return (
                 f"🎯 <b>سیگنال لانگ سنسی (خشکی حجم در کف ۲۵)</b>\n"
                 f"▫️ ارز: <code>{market_code}</code> ({market_type_str})\n"
                 f"▫️ تایم‌فریم: <b>15 دقیقه</b>\n"
@@ -239,9 +231,8 @@ def check_sensi_strategy(df, market_code, is_margin=True):
                 f"🎯 <b>حد سود ۱ (1.5R):</b> {tp1:,.4f}\n"
                 f"🎯 <b>حد سود ۲ (2.5R):</b> {tp2:,.4f}"
             )
-            return msg
 
-    # ================== سناریو ۲: سیگنال شورت در سقف (فقط نمادهای تعهدی) ==================
+    # سناریو ۲: شورت
     if is_margin:
         near_resistance = (
             (sig_candle["high"] >= prior_resistance * 0.997) and 
@@ -259,7 +250,7 @@ def check_sensi_strategy(df, market_code, is_margin=True):
             if risk > 0:
                 tp1 = entry - (1.5 * risk)
                 tp2 = entry - (2.5 * risk)
-                msg = (
+                return (
                     f"🔻 <b>سیگنال شورت سنسی (خشکی حجم در سقف ۲۵)</b>\n"
                     f"▫️ ارز: <code>{market_code}</code> (تعهدی / مارجین)\n"
                     f"▫️ تایم‌فریم: <b>15 دقیقه</b>\n"
@@ -270,7 +261,6 @@ def check_sensi_strategy(df, market_code, is_margin=True):
                     f"🎯 <b>حد سود ۱ (1.5R):</b> {tp1:,.4f}\n"
                     f"🎯 <b>حد سود ۲ (2.5R):</b> {tp2:,.4f}"
                 )
-                return msg
 
     return None
 
@@ -279,8 +269,7 @@ def check_trend_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
         return None
 
-    last = df.iloc[-2]  # آخرین کندل کامل شده
-
+    last = df.iloc[-2]
     c = last["close"]
     lower = last["bb_lower"]
     upper = last["bb_upper"]
@@ -288,7 +277,6 @@ def check_trend_strategy(df, market_code, is_margin=True):
     rsi = last["rsi"]
     atr = last["atr"] if not pd.isna(last["atr"]) else (c * 0.01)
 
-    # سیگنال خرید استاندارد (لانگ)
     if c <= lower and c > ema and rsi < 35:
         tp = c + (2 * atr)
         sl = c - (1.5 * atr)
@@ -302,7 +290,6 @@ def check_trend_strategy(df, market_code, is_margin=True):
             f"🎯 حد سود (TP): {tp:,.4f}"
         )
 
-    # سیگنال فروش استاندارد (فقط برای نمادهای مارجین)
     if is_margin and c >= upper and c < ema and rsi > 65:
         tp = c - (2 * atr)
         sl = c + (1.5 * atr)
@@ -319,10 +306,6 @@ def check_trend_strategy(df, market_code, is_margin=True):
 
 # ================= استراتژی پولبک پس از شکست سطح =================
 def check_pullback_strategy(df, market_code, is_margin=True):
-    """
-    شکست سقف/کف ۲۵ کندل با حجم بالاتر از ۱.۵ برابر میانگین ۲۰ کندل،
-    بازگشت به سطح طی ۱ تا ۸ کندل با حجم کمتر، و تأیید در آخرین کندل بسته‌شده.
-    """
     if len(df) < 55:
         return None
 
@@ -334,7 +317,6 @@ def check_pullback_strategy(df, market_code, is_margin=True):
     if pd.isna(atr) or atr <= 0:
         return None
 
-    # آخرین شکست معتبر را زودتر بررسی می‌کند.
     for breakout_index in range(sig_index - 2, max(24, sig_index - 10), -1):
         prior_25 = df.iloc[breakout_index - 25:breakout_index]
         prior_20_volume = df.iloc[breakout_index - 20:breakout_index]["volume"].mean()
@@ -358,9 +340,8 @@ def check_pullback_strategy(df, market_code, is_margin=True):
             continue
 
         tolerance = 0.3 * atr
-
-        # پولبک لانگ: شکست مقاومت و بازگشت به سطح شکسته‌شده
         resistance = prior_25["high"].max()
+
         if (
             breakout["close"] > resistance
             and sig_candle["close"] > ema_now > ema_five_candles_ago
@@ -372,7 +353,6 @@ def check_pullback_strategy(df, market_code, is_margin=True):
             entry = sig_candle["close"]
             sl = min(pullback["low"].min(), sig_candle["low"]) - (0.2 * atr)
             risk = entry - sl
-
             if risk > 0:
                 tp = entry + (2 * risk)
                 market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات (فقط خرید)"
@@ -386,7 +366,6 @@ def check_pullback_strategy(df, market_code, is_margin=True):
                     f"🎯 حد سود (2R): {tp:,.4f}"
                 )
 
-        # پولبک شورت فقط برای نمادهای مارجین
         support = prior_25["low"].min()
         if (
             is_margin
@@ -400,7 +379,6 @@ def check_pullback_strategy(df, market_code, is_margin=True):
             entry = sig_candle["close"]
             sl = max(pullback["high"].max(), sig_candle["high"]) + (0.2 * atr)
             risk = sl - entry
-
             if risk > 0:
                 tp = entry - (2 * risk)
                 return (
@@ -458,7 +436,7 @@ def run_scanner():
                             send_telegram(trend_msg)
                             time.sleep(1)
 
-                        # ۳. بررسی استراتژی پولبک، فقط اگر روند سیگنال نداده باشد
+                        # ۳. بررسی استراتژی پولبک
                         if not trend_msg:
                             pullback_msg = check_pullback_strategy(df, symbol, is_margin=is_margin)
                             if pullback_msg:
