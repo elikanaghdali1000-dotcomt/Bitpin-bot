@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "*******")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
@@ -216,6 +216,21 @@ def check_sensi_strategy(df, market_code, is_margin=True):
             tp2 = entry + (2.5 * risk)
             market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
             return f"🎯 <b>سیگنال لانگ سنسی (خشکی حجم در کف)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}"
+
+    # ---------- شرط شورت: خشکی حجم در سقف (فقط مارجین) ----------
+    if is_margin:
+        prior_resistance = lookback_window["high"].max()
+        near_resistance = (sig_candle["high"] >= prior_resistance * 0.992) and (sig_candle["high"] <= prior_resistance * 1.003)
+        is_bearish_reversal = (sig_candle["close"] < sig_candle["open"]) or (sig_candle["close"] < sig_candle["low"] + 0.4 * (sig_candle["high"] - sig_candle["low"]))
+
+        if near_resistance and is_volume_dried and is_bearish_reversal:
+            entry = sig_candle["close"]
+            sl = max(prior_resistance, sig_candle["high"]) + (0.2 * atr)
+            risk = sl - entry
+            if risk > 0:
+                tp1 = entry - (1.5 * risk)
+                market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
+                return f"🔻 <b>سیگنال شورت سنسی (خشکی حجم در سقف)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}"
     return None
 
 def check_trend_strategy(df, market_code, is_margin=True):
@@ -228,6 +243,16 @@ def check_trend_strategy(df, market_code, is_margin=True):
     if c <= lower and c > ema and rsi < 35:
         market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
         return f"🟢 <b>سیگنال لانگ بولینگر (روند)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n▫️ ورود: {c:,.4f}\n▫️ RSI: {rsi:.1f}"
+
+    # ---------- شرط شورت: سقف بولینگر در روند نزولی (فقط مارجین) ----------
+    if is_margin:
+        if c >= upper and c < ema and rsi > 65:
+            sl = upper + atr
+            risk = sl - c
+            if risk > 0:
+                tp1 = c - (1.5 * risk)
+                market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
+                return f"🔴 <b>سیگنال شورت بولینگر (روند)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n▫️ ورود: {c:,.4f}\n▫️ RSI: {rsi:.1f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}"
     return None
 
 def check_pullback_strategy(df, market_code, is_margin=True):
@@ -251,6 +276,21 @@ def check_pullback_strategy(df, market_code, is_margin=True):
             tp1 = entry + (2 * risk)
             market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
             return f"📈 <b>سیگنال پولبک به EMA200 (ادامه روند)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود: {tp1:,.4f}"
+
+    # ---------- شرط شورت: پولبک نزولی به EMA200 (فقط مارجین) ----------
+    if is_margin:
+        is_downtrend = c < ema
+        near_ema_short = (last["high"] >= ema * 0.985) and (last["high"] <= ema * 1.015)
+        is_rejection = last["close"] < last["open"] and last["close"] < ema
+
+        if is_downtrend and near_ema_short and is_rejection and (35 <= rsi <= 60):
+            entry = c
+            sl = ema + (1.5 * atr)
+            risk = sl - entry
+            if risk > 0:
+                tp1 = entry - (2 * risk)
+                market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
+                return f"📉 <b>سیگنال شورت پولبک به EMA200 (ادامه روند نزولی)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود: {tp1:,.4f}"
     return None
 
 # ================= حلقه اصلی پایش و اسکن بازار =================
