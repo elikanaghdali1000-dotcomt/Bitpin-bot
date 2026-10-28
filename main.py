@@ -531,7 +531,7 @@ def run_scanner():
                     total_checked = 0
                     signals_found = 0
 
-                    for item in ALL_WATCHLIS: # برای تست سریع، ۱۰ ارز اول رو چک می‌کنه تا ببینیم دیتا میاد یا نه
+                    for item in ALL_WATCHLIST: # برای تست سریع، ۱۰ ارز اول رو چک می‌کنه تا ببینیم دیتا میاد یا نه
                         symbol = item["symbol"]
                         is_margin = item["is_margin"]
                         total_checked += 1
