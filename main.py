@@ -26,6 +26,11 @@ TRACKER_FILE = os.getenv("SIGNAL_TRACKER_FILE", "signal_tracker.json")
 CHECK_INTERVAL = 60   # هر ۱ دقیقه چک می‌کند
 TIMEFRAME = "15"      # تایم‌فریم ۱۵ دقیقه
 
+# --- تنظیمات جدید: اعلام سیگنال سنسی در ۲ دقیقه و ۳۰ ثانیه پایانی کندل ---
+SENSI_PRECLOSE_WINDOW = 150        # ثانیه مانده به بسته شدن کندل (۲ دقیقه و ۳۰ ثانیه)
+SENSI_SCAN_SYMBOLS = MARGIN_SYMBOLS if False else None  # (پایین از MARGIN_SYMBOLS استفاده می‌شود)
+SENSI_LOOP_INTERVAL = 15           # فاصله بیدار شدن اسکنر برای شکار پنجره ۱۵۰ ثانیه‌ای
+
 # وضعیت سیگنال‌ها در حافظه و فایل JSON
 tracker_lock = threading.RLock()
 signal_tracker = {}
@@ -331,7 +336,6 @@ def check_pullback_strategy(df, market_code, is_margin=True):
                     f"🛡 حد ضرر: {sl:,.4f}\n"
                     f"🎯 حد سود ۱: {tp1:,.4f}")
 
-
 # ================= Signal Tracker (ذخیره و پیگیری سیگنال‌ها) =================
 def load_tracker():
     global signal_tracker
@@ -479,7 +483,6 @@ def telegram_stats_command_handler():
             print(f"[Stats Polling Error] {e}")
             time.sleep(3)
 
-
 # ================= ثبت و ارسال سیگنال (ارتباط استراتژی با رهگیر) =================
 def extract_signal_details(msg):
     """استخراج ورود/حد ضرر/حد سود ۱ از متن پیام برای ثبت در رهگیر."""
@@ -499,6 +502,48 @@ def register_and_send(strategy_name, msg, symbol, is_margin):
     if entry is None:
         return
     add_signal(symbol, direction, entry, sl if sl is not None else 0.0, tp1 if tp1 is not None else 0.0, strategy_name, is_margin)
+
+# ================= اسکن سنسی در ۲ دقیقه و ۳۰ ثانیه پایانی کندل (فقط ارزهای تعهدی) =================
+def run_sensi_preclose_scan():
+    """اسکن استراتژی سنسی روی ۱۰۰ ارز تعهدی، وقتی ۱۵۰ ثانیه (۲ دقیقه و ۳۰ ثانیه) به بسته شدن کندل مانده است."""
+    print("Sensi pre-close scan started (2m30s before candle close, margin symbols only).")
+    last_sensi_scan_candle_id = None
+
+    while True:
+        try:
+            now_ts = int(time.time())
+            res_seconds = int(TIMEFRAME) * 60  # 900 ثانیه برای تایم‌فریم ۱۵ دقیقه
+            candle_end_ts = (now_ts // res_seconds + 1) * res_seconds
+            remaining = candle_end_ts - now_ts
+            candle_id = candle_end_ts // res_seconds
+
+            # وقتی ۱۵۰ ثانیه یا کمتر به پایان کندل مانده باشد و این کندل قبلاً اسکن نشده باشد
+            if 0 < remaining <= SENSI_PRECLOSE_WINDOW and last_sensi_scan_candle_id != candle_id:
+                last_sensi_scan_candle_id = candle_id
+                print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Sensi pre-close scan: {remaining}s to candle close.")
+
+                for symbol in MARGIN_SYMBOLS:
+                    df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=100)
+                    if df is not None and not df.empty:
+                        df = calculate_indicators(df)
+                        if df is not None:
+                            # فیلتر بولینگر اسکوییز
+                            if is_squeeze(df):
+                                time.sleep(0.3)
+                                continue
+
+                            sensi_res = check_sensi_strategy(df, symbol, is_margin=True)
+                            if sensi_res:
+                                register_and_send("sensi", sensi_res, symbol, True)
+
+                    time.sleep(0.3)
+
+                print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Sensi pre-close scan finished.")
+
+            time.sleep(SENSI_LOOP_INTERVAL)
+        except Exception as e:
+            print(f"[Sensi Pre-close Loop Error] {e}")
+            time.sleep(10)
 
 # ================= حلقه اصلی پایش و اسکن بازار =================
 def run_scanner():
@@ -531,7 +576,7 @@ def run_scanner():
                     total_checked = 0
                     signals_found = 0
 
-                    for item in ALL_WATCHLIST: # برای تست سریع، ۱۰ ارز اول رو چک می‌کنه تا ببینیم دیتا میاد یا نه
+                    for item in ALL_WATCHLIST:
                         symbol = item["symbol"]
                         is_margin = item["is_margin"]
                         total_checked += 1
@@ -541,16 +586,13 @@ def run_scanner():
                             success_count += 1
                             df = calculate_indicators(df)
                             if df is not None:
-                                # فیلتر بولینگر اسکوییز: اگر BandWidth زیر آستانه باشد، سیگنال جدید ارسال نمی‌شود
+                                # فیلتر بولینگر اسکوییز
                                 if is_squeeze(df):
                                     continue
 
-                                # چک کردن استراتژی ۱: سنسی
-                                sensi_res = check_sensi_strategy(df, symbol, is_margin=is_margin)
-                                if sensi_res:
-                                    register_and_send("sensi", sensi_res, symbol, is_margin)
-                                    signals_found += 1
-                                    continue
+                                # توجه: استراتژی سنسی فقط در ۲ دقیقه و ۳۰ ثانیه پایانی کندل
+                                # و فقط روی ارزهای تعهدی (MARGIN_SYMBOLS) اسکن می‌شود
+                                # (run_sensi_preclose_scan)
 
                                 # چک کردن استراتژی ۲: بولینگر روند
                                 trend_res = check_trend_strategy(df, symbol, is_margin=is_margin)
@@ -601,5 +643,8 @@ if __name__ == "__main__":
 
     stats_thread = threading.Thread(target=telegram_stats_command_handler, daemon=True)
     stats_thread.start()
+
+    sensi_preclose_thread = threading.Thread(target=run_sensi_preclose_scan, daemon=True)
+    sensi_preclose_thread.start()
 
     run_scanner()
