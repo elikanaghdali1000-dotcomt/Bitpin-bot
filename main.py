@@ -26,54 +26,37 @@ TRACKER_FILE = os.getenv("SIGNAL_TRACKER_FILE", "signal_tracker.json")
 CHECK_INTERVAL = 60   # هر ۱ دقیقه چک می‌کند
 TIMEFRAME = "15"      # تایم‌فریم ۱۵ دقیقه
 
-# --- تنظیمات اختصاصی سنسی: اعلام سیگنال در ۲ دقیقه و ۳۰ ثانیه پایانی همین کندل ---
-SENSI_PRECLOSE_WINDOW = 150        # ثانیه مانده به بسته شدن همین کندل (۲ دقیقه و ۳۰ ثانیه)
-SENSI_LOOP_INTERVAL = 15           # فاصله بیدار شدن اسکنر برای شکار دقیق پنجره ۱۵۰ ثانیه‌ای
-
 # وضعیت سیگنال‌ها در حافظه و فایل JSON
 tracker_lock = threading.RLock()
 signal_tracker = {}
 
-# ----------------- لیست ۱۰۰ ارز مارجین / تعهدی (پایه USDT) -----------------
+# ----------------- ۱۱۰ نماد مارجین / فیوچرز (پایه USDT) -----------------
 MARGIN_SYMBOLS = [
-    "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT",
-    "ADA_USDT", "AVAX_USDT", "LINK_USDT", "SUI_USDT", "NEAR_USDT",
-    "DOT_USDT", "TRX_USDT", "LTC_USDT", "BCH_USDT", "UNI_USDT",
-    "APT_USDT", "ICP_USDT", "SHIB_USDT", "PEPE_USDT", "RENDER_USDT",
-    "FET_USDT", "TAO_USDT", "FTM_USDT", "AAVE_USDT", "OP_USDT",
-    "ARB_USDT", "INJ_USDT", "TIA_USDT", "SEI_USDT", "STX_USDT",
-    "FIL_USDT", "ATOM_USDT", "RUNE_USDT", "GRT_USDT", "LDO_USDT",
-    "KAS_USDT", "WIF_USDT", "BONK_USDT", "FLOKI_USDT", "GALA_USDT",
-    "SAND_USDT", "MANA_USDT", "AXS_USDT", "THETA_USDT", "EOS_USDT",
-    "FLOW_USDT", "DYDX_USDT", "CRV_USDT", "MKR_USDT", "SNX_USDT",
-    "ALGO_USDT", "QNT_USDT", "XTZ_USDT", "IMX_USDT", "MINA_USDT",
-    "CHZ_USDT", "ZIL_USDT", "ENJ_USDT", "1INCH_USDT", "COMP_USDT",
-    "HOT_USDT", "JASMY_USDT", "WOO_USDT", "BLUR_USDT", "PENDLE_USDT",
-    "ORDI_USDT", "SATS_USDT", "BEAM_USDT", "PYTH_USDT", "JUP_USDT",
-    "WLD_USDT", "STRK_USDT", "ZK_USDT", "NOT_USDT", "TON_USDT",
-    "OM_USDT", "CFX_USDT", "NEO_USDT", "IOTA_USDT", "KAVA_USDT",
-    "KLAY_USDT", "ROSE_USDT", "MASK_USDT", "AGIX_USDT", "OCEAN_USDT",
-    "CELO_USDT", "LRC_USDT", "ANKR_USDT", "AUDIO_USDT", "BAT_USDT",
-    "BNT_USDT", "DGB_USDT", "GNO_USDT", "KNC_USDT", "ONT_USDT",
-    "SKL_USDT", "SUSHI_USDT", "YFI_USDT", "ZRX_USDT", "VET_USDT"
+    'BTC_USDT', 'ETH_USDT', 'SOL_USDT', 'XRP_USDT', 'DOGE_USDT',
+    'ADA_USDT', 'AVAX_USDT', 'LINK_USDT', 'SUI_USDT', 'NEAR_USDT',
+    'DOT_USDT', 'TRX_USDT', 'LTC_USDT', 'BCH_USDT', 'UNI_USDT',
+    'APT_USDT', 'ICP_USDT', 'SHIB_USDT', 'PEPE_USDT', 'RENDER_USDT',
+    'FET_USDT', 'TAO_USDT', 'FTM_USDT', 'AAVE_USDT', 'OP_USDT',
+    'ARB_USDT', 'INJ_USDT', 'TIA_USDT', 'SEI_USDT', 'STX_USDT',
+    'FIL_USDT', 'ATOM_USDT', 'RUNE_USDT', 'GRT_USDT', 'LDO_USDT',
+    'KAS_USDT', 'WIF_USDT', 'BONK_USDT', 'FLOKI_USDT', 'GALA_USDT',
+    'SAND_USDT', 'MANA_USDT', 'AXS_USDT', 'THETA_USDT', 'EOS_USDT',
+    'FLOW_USDT', 'DYDX_USDT', 'CRV_USDT', 'MKR_USDT', 'SNX_USDT',
+    'ALGO_USDT', 'QNT_USDT', 'XTZ_USDT', 'IMX_USDT', 'MINA_USDT',
+    'CHZ_USDT', 'ZIL_USDT', 'ENJ_USDT', '1INCH_USDT', 'COMP_USDT',
+    'HOT_USDT', 'JASMY_USDT', 'WOO_USDT', 'BLUR_USDT', 'PENDLE_USDT',
+    'ORDI_USDT', 'SATS_USDT', 'BEAM_USDT', 'PYTH_USDT', 'JUP_USDT',
+    'WLD_USDT', 'STRK_USDT', 'ZK_USDT', 'NOT_USDT', 'TON_USDT',
+    'OM_USDT', 'CFX_USDT', 'NEO_USDT', 'IOTA_USDT', 'KAVA_USDT',
+    'KLAY_USDT', 'ROSE_USDT', 'MASK_USDT', 'AGIX_USDT', 'OCEAN_USDT',
+    'CELO_USDT', 'LRC_USDT', 'ANKR_USDT', 'AUDIO_USDT', 'BAT_USDT',
+    'BNT_USDT', 'DGB_USDT', 'GNO_USDT', 'KNC_USDT', 'ONT_USDT',
+    'SKL_USDT', 'SUSHI_USDT', 'YFI_USDT', 'ZRX_USDT', 'VET_USDT',
+    'ONDO_USDT', 'ENA_USDT', 'EIGEN_USDT', 'HBAR_USDT', 'POL_USDT',
+    'TWT_USDT', 'ASTR_USDT', 'PAXG_USDT', 'PENGU_USDT', 'TRUMP_USDT',
 ]
 
-# ----------------- لیست ۲۰ ارز اسپات منتخب (پایه USDT) -----------------
-SPOT_ONLY_MARKETS = [
-    "DOGS_USDT", "HMSTR_USDT", "CATI_USDT", "MAJOR_USDT", "MEME_USDT",
-    "BOME_USDT", "POPCAT_USDT", "MEW_USDT", "BABYDOGE_USDT", "TURBO_USDT",
-    "NEIRO_USDT", "EIGEN_USDT", "ENA_USDT", "ETHFI_USDT", "IO_USDT",
-    "SAGA_USDT", "BB_USDT", "REZ_USDT", "NOT_USDT", "ZK_USDT"
-]
-
-ALL_WATCHLIST = []
-for s in MARGIN_SYMBOLS:
-    ALL_WATCHLIST.append({"symbol": s, "is_margin": True})
-
-existing = set(MARGIN_SYMBOLS)
-for s in SPOT_ONLY_MARKETS:
-    if s not in existing:
-        ALL_WATCHLIST.append({"symbol": s, "is_margin": False})
+# واچ‌لیست فقط شامل نمادهای مارجین / فیوچرز است.
 
 # ================= سرور داخلی برای زنده نگه داشتن Render =================
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -85,7 +68,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         self.send_response(200)
-        self.send_header()
+        self.end_headers()
 
 def run_http_server():
     port = int(os.environ.get("PORT", 10000))
@@ -202,14 +185,29 @@ def calculate_indicators(df):
 
     return df
 
-# ================= استراتژی سنسی اختصاصی روی همین کندل لایو (iloc[-1]) =================
-def check_sensi_strategy_live(df, market_code, is_margin=True):
-    """بررسی سنسی دقیقاً روی همین کندل جاری (iloc[-1]) در ۲ دقیقه و ۳۰ ثانیه پایانی آن."""
+# تایید فشار فروش: کندل قرمز قوی، بسته‌شدن در بخش پایینی دامنه و حجم بالاتر از میانگین
+def _has_confirmed_selling_pressure(candle, previous_candle):
+    candle_range = candle["high"] - candle["low"]
+    vol_ma20 = candle.get("vol_ma20", float("nan"))
+    volume = candle["volume"]
+    previous_volume = previous_candle["volume"]
+    if pd.isna(vol_ma20) or vol_ma20 <= 0 or candle_range <= 0:
+        return False
+    return (
+        candle["close"] < candle["open"]
+        and (candle["open"] - candle["close"]) >= 0.4 * candle_range
+        and candle["close"] <= candle["low"] + 0.4 * candle_range
+        and volume >= 1.2 * vol_ma20
+        and volume > previous_volume
+    )
+
+
+# ================= استراتژی‌ها (سنسی، روند، پولبک) =================
+def check_sensi_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
         return None
-    # دقیقا همین کندل در حال بسته شدن
-    sig_candle = df.iloc[-1]
-    lookback_window = df.iloc[-26:-1]
+    sig_candle = df.iloc[-2]
+    lookback_window = df.iloc[-27:-2]
     prior_support = lookback_window["low"].min()
     prior_resistance = lookback_window["high"].max()
 
@@ -234,19 +232,20 @@ def check_sensi_strategy_live(df, market_code, is_margin=True):
         if risk > 0:
             tp1 = entry + (1.5 * risk)
             tp2 = entry + (2.5 * risk)
-            market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
+            market_type_str = "تعهدی / فیوچرز"
             return f"🎯 <b>سیگنال لانگ سنسی (خشکی حجم در کف)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n📌 موقعیت: LONG\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}"
 
     near_resistance = (sig_candle["high"] <= prior_resistance * 1.003) and (sig_candle["high"] >= prior_resistance * 0.992)
-    is_bearish_reversal = (sig_candle["close"] < sig_candle["open"]) or (sig_candle["close"] < sig_candle["low"] + 0.4 * (sig_candle["high"] - sig_candle["low"]))
+    previous_candle = df.iloc[-3]
+    has_confirmed_selling_pressure = _has_confirmed_selling_pressure(sig_candle, previous_candle)
 
-    if is_margin and near_resistance and is_volume_dried and is_bearish_reversal:
+    if near_resistance and has_confirmed_selling_pressure:
         entry = sig_candle["close"]
         sl = max(prior_resistance, sig_candle["high"]) + (0.2 * atr)
         risk = sl - entry
         if risk > 0:
             tp1 = entry - (1.5 * risk)
-            market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
+            market_type_str = "تعهدی / فیوچرز"
             return f"🎯 <b>سیگنال شورت سنسی (خشکی حجم در سقف)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n📌 موقعیت: SHORT\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}"
     return None
 
@@ -258,15 +257,16 @@ def check_trend_strategy(df, market_code, is_margin=True):
     if pd.isna(atr): atr = c * 0.01
 
     if c <= lower and c > ema and rsi < 35:
-        return f"🟢 <b>سیگنال لانگ بولینگر</b>\n▫️ ارز: <code>{market_code}</code>\n📌 موقعیت: LONG ({'تعهدی / فیوچرز' if is_margin else 'اسپات'})\n▫️ ورود: {c:,.4f}\n▫️ RSI: {rsi:.1f}"
+        return f"🟢 <b>سیگنال لانگ بولینگر</b>\n▫️ ارز: <code>{market_code}</code>\n📌 موقعیت: LONG (تعهدی / فیوچرز)\n▫️ ورود: {c:,.4f}\n▫️ RSI: {rsi:.1f}"
 
-    if is_margin and c >= upper and c < ema and rsi > 65:
+    previous = df.iloc[-3]
+    if c >= upper and c < ema and rsi > 65 and _has_confirmed_selling_pressure(last, previous):
         entry = c
         sl = upper + atr
         risk = sl - entry
         if risk > 0:
             tp1 = entry - (1.5 * risk)
-            market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
+            market_type_str = "تعهدی / فیوچرز"
             return f"🔴 <b>سیگنال شورت بولینگر (روند)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n📌 موقعیت: SHORT\n▫️ ورود: {entry:,.4f}\n▫️ RSI: {rsi:.1f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}"
     return None
 
@@ -293,10 +293,12 @@ def check_pullback_strategy(df, market_code, is_margin=True):
     if pd.isna(atr) or atr <= 0:
         atr = close * 0.01
 
+    # Trend context: price above EMA200 and EMA200 rising versus five candles ago.
     ema_5_ago = df.iloc[-7]["ema200"]
     if pd.isna(ema_5_ago) or close <= ema or ema <= ema_5_ago:
         return None
 
+    # Pullback reaches the BB middle / EMA20 area, then closes back above it.
     touch_zone = low <= bb_middle * 1.01 and low >= bb_middle * 0.97
     bullish_reclaim = close > open_price and close > bb_middle and previous["close"] <= previous["bb_middle"] * 1.01
     if not (touch_zone and bullish_reclaim and 35 <= rsi <= 60):
@@ -311,7 +313,7 @@ def check_pullback_strategy(df, market_code, is_margin=True):
         return None
     tp1 = entry + 1.5 * risk
     tp2 = entry + 2.5 * risk
-    market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
+    market_type_str = "تعهدی / فیوچرز"
     return (f"↗️ <b>سیگنال لانگ پولبک (روند صعودی)</b>\n"
             f"▫️ ارز: <code>{market_code}</code> ({market_type_str})\n"
             f"📌 موقعیت: LONG\n"
@@ -321,19 +323,20 @@ def check_pullback_strategy(df, market_code, is_margin=True):
             f"🎯 حد سود ۲: {tp2:,.4f}\n"
             f"▫️ RSI: {rsi:.1f}")
 
-    if is_margin and close < ema and high >= ema * 0.985 and high <= ema * 1.015 and close < open_price and close < ema and 35 <= rsi <= 60:
+    if close < ema and high >= ema * 0.985 and high <= ema * 1.015 and close < open_price and close < ema and 35 <= rsi <= 60:
         entry = close
         sl = ema + 1.5 * atr
         risk = sl - entry
         if risk > 0:
             tp1 = entry - 2 * risk
-            market_type_str = "تعهدی / فیوچرز" if is_margin else "اسپات"
+            market_type_str = "تعهدی / فیوچرز"
             return (f"🔻 <b>سیگنال شورت پولبک به EMA200 (ادامه روند نزولی)</b>\n"
                     f"▫️ ارز: <code>{market_code}</code> ({market_type_str})\n"
                     f"📌 موقعیت: SHORT\n"
                     f"▫️ ورود: {entry:,.4f}\n"
                     f"🛡 حد ضرر: {sl:,.4f}\n"
                     f"🎯 حد سود ۱: {tp1:,.4f}")
+
 
 # ================= Signal Tracker (ذخیره و پیگیری سیگنال‌ها) =================
 def load_tracker():
@@ -355,7 +358,7 @@ def save_tracker():
         except Exception as e:
             print(f"[Tracker] Save error: {e}")
 
-def add_signal(symbol, direction, entry, sl, tp1, strategy, is_margin):
+def add_signal(symbol, direction, entry, sl, tp1, strategy, is_margin=True):
     sid = f"{symbol}_{strategy}_{uuid.uuid4().hex[:8]}"
     rec = {
         "id": sid,
@@ -388,11 +391,10 @@ def tracker_stats():
     return total, wins, losses, open_signals, win_rate, ambiguous
 
 # ================= بولینگر اسکوییز (فیلتر فشردگی باند) =================
-def is_squeeze(df, use_live=False):
-    """اگر BandWidth زیر آستانه باشد، سیگنال مسدود می‌شود."""
+def is_squeeze(df):
+    """اگر BandWidth آخرین کندل بسته‌شده زیر آستانه باشد، سیگنال جدید ارسال نمی‌شود."""
     try:
-        idx = -1 if use_live else -2
-        bw = df.iloc[idx]["bandwidth"]
+        bw = df.iloc[-2]["bandwidth"]
         if pd.isna(bw):
             return False
         return bw < BOLLINGER_SQUEEZE_THRESHOLD
@@ -425,7 +427,7 @@ def run_signal_tracker():
                     continue
                 hit_tp, hit_sl = check_hit(sig["symbol"], sig["direction"], sig["tp1"], sig["sl"], current_price)
                 if hit_tp and hit_sl:
-                    status = "AMBIGUOUS"
+                    status = "AMBIGUOUS"  # هر دو در یک کندل؛ نامشخص کدام اول رخ داده
                 elif hit_tp:
                     status = "HIT_TP1"
                 elif hit_sl:
@@ -483,8 +485,10 @@ def telegram_stats_command_handler():
             print(f"[Stats Polling Error] {e}")
             time.sleep(3)
 
+
 # ================= ثبت و ارسال سیگنال (ارتباط استراتژی با رهگیر) =================
 def extract_signal_details(msg):
+    """استخراج ورود/حد ضرر/حد سود ۱ از متن پیام برای ثبت در رهگیر."""
     def num(pat):
         m = re.search(pat, msg)
         return float(m.group(1).replace(",", "")) if m else None
@@ -494,56 +498,13 @@ def extract_signal_details(msg):
     direction = "SHORT" if "موقعیت: SHORT" in msg else "LONG"
     return direction, entry, sl, tp1
 
-def register_and_send(strategy_name, msg, symbol, is_margin):
+def register_and_send(strategy_name, msg, symbol, is_margin=True):
     if not send_telegram(msg):
         return
     direction, entry, sl, tp1 = extract_signal_details(msg)
     if entry is None:
         return
     add_signal(symbol, direction, entry, sl if sl is not None else 0.0, tp1 if tp1 is not None else 0.0, strategy_name, is_margin)
-
-# ================= اسکن سنسی در ۲ دقیقه و ۳۰ ثانیه پایانی همین کندل (فقط ارزهای تعهدی) =================
-def run_sensi_preclose_scan():
-    """اسکن سنسی دقیقاً روی همین کندل جاری (iloc[-1]) در ۱۵۰ ثانیه پایانی آن روی ۱۰۰ ارز تعهدی."""
-    print("Sensi pre-close scan started (2m30s before CURRENT candle close, margin symbols only).")
-    last_sensi_scan_candle_id = None
-
-    while True:
-        try:
-            now_ts = int(time.time())
-            res_seconds = int(TIMEFRAME) * 60  # 900 ثانیه برای تایم‌فریم ۱۵ دقیقه
-            candle_end_ts = (now_ts // res_seconds + 1) * res_seconds
-            remaining = candle_end_ts - now_ts
-            candle_id = candle_end_ts // res_seconds
-
-            # دقیقا در ۱۵۰ ثانیه یا کمتر مانده به پایان همین کندل
-            if 0 < remaining <= SENSI_PRECLOSE_WINDOW and last_sensi_scan_candle_id != candle_id:
-                last_sensi_scan_candle_id = candle_id
-                print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Sensi pre-close scan on CURRENT candle: {remaining}s left.")
-
-                for symbol in MARGIN_SYMBOLS:
-                    df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=100)
-                    if df is not None and not df.empty:
-                        df = calculate_indicators(df)
-                        if df is not None:
-                            # فیلتر بولینگر اسکوییز روی همین کندل لایو
-                            if is_squeeze(df, use_live=True):
-                                time.sleep(0.3)
-                                continue
-
-                            # بررسی سنسی روی همین کندل لایو (iloc[-1])
-                            sensi_res = check_sensi_strategy_live(df, symbol, is_margin=True)
-                            if sensi_res:
-                                register_and_send("sensi", sensi_res, symbol, True)
-
-                    time.sleep(0.3)
-
-                print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Sensi pre-close scan finished.")
-
-            time.sleep(SENSI_LOOP_INTERVAL)
-        except Exception as e:
-            print(f"[Sensi Pre-close Loop Error] {e}")
-            time.sleep(10)
 
 # ================= حلقه اصلی پایش و اسکن بازار =================
 def run_scanner():
@@ -562,13 +523,13 @@ def run_scanner():
     while True:
         try:
             now = datetime.now(timezone.utc)
-            current_minute = now.minute
-            candle_index = current_minute // 15
-            target_start_minute = candle_index * 15 + 1
+            # Run once at the precise pre-close point: 150 seconds before the next 15m close.
+            quarter_start = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
+            candle_close = quarter_start + pd.Timedelta(minutes=15)
+            scan_time = candle_close - pd.Timedelta(seconds=150)
+            current_candle_id = candle_close.strftime('%Y-%m-%dT%H:%M:%SZ')
 
-            if current_minute == target_start_minute:
-                current_candle_id = f"{now.strftime('%Y-%m-%d-%H')}-{candle_index}"
-                
+            if abs((now - scan_time.to_pytimedelta()).total_seconds()) <= 1.0:
                 if last_scanned_candle_time != current_candle_id:
                     print(f"[{now.strftime('%H:%M:%S')}] Starting full market scan...")
                     
@@ -576,9 +537,7 @@ def run_scanner():
                     total_checked = 0
                     signals_found = 0
 
-                    for item in ALL_WATCHLIST:
-                        symbol = item["symbol"]
-                        is_margin = item["is_margin"]
+                    for symbol in MARGIN_SYMBOLS:  # scan all 110 margin/futures symbols
                         total_checked += 1
 
                         df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=100)
@@ -586,21 +545,28 @@ def run_scanner():
                             success_count += 1
                             df = calculate_indicators(df)
                             if df is not None:
-                                # فیلتر بولینگر اسکوییز کندل بسته شده
-                                if is_squeeze(df, use_live=False):
+                                # فیلتر بولینگر اسکوییز: اگر BandWidth زیر آستانه باشد، سیگنال جدید ارسال نمی‌شود
+                                if is_squeeze(df):
+                                    continue
+
+                                # چک کردن استراتژی ۱: سنسی
+                                sensi_res = check_sensi_strategy(df, symbol, is_margin=True)
+                                if sensi_res:
+                                    register_and_send("sensi", sensi_res, symbol, is_margin=True)
+                                    signals_found += 1
                                     continue
 
                                 # چک کردن استراتژی ۲: بولینگر روند
-                                trend_res = check_trend_strategy(df, symbol, is_margin=is_margin)
+                                trend_res = check_trend_strategy(df, symbol, is_margin=True)
                                 if trend_res:
-                                    register_and_send("trend", trend_res, symbol, is_margin)
+                                    register_and_send("trend", trend_res, symbol, is_margin=True)
                                     signals_found += 1
                                     continue
 
                                 # چک کردن استراتژی ۳: پولبک EMA200
-                                pullback_res = check_pullback_strategy(df, symbol, is_margin=is_margin)
+                                pullback_res = check_pullback_strategy(df, symbol, is_margin=True)
                                 if pullback_res:
-                                    register_and_send("pullback", pullback_res, symbol, is_margin)
+                                    register_and_send("pullback", pullback_res, symbol, is_margin=True)
                                     signals_found += 1
 
                         time.sleep(0.3)
@@ -618,7 +584,7 @@ def run_scanner():
                     last_scanned_candle_time = current_candle_id
                     print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Scan & Debug finished.")
 
-            time.sleep(CHECK_INTERVAL)
+            time.sleep(0.25)
 
         except Exception as e:
             print(f"Loop error: {e}")
@@ -639,8 +605,5 @@ if __name__ == "__main__":
 
     stats_thread = threading.Thread(target=telegram_stats_command_handler, daemon=True)
     stats_thread.start()
-
-    sensi_preclose_thread = threading.Thread(target=run_sensi_preclose_scan, daemon=True)
-    sensi_preclose_thread.start()
 
     run_scanner()
