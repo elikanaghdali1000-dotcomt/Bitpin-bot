@@ -7,7 +7,7 @@ import uuid
 import requests
 import pandas as pd
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
@@ -525,11 +525,11 @@ def run_scanner():
             now = datetime.now(timezone.utc)
             # Run once at the precise pre-close point: 150 seconds before the next 15m close.
             quarter_start = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
-            candle_close = quarter_start + pd.Timedelta(minutes=15)
-            scan_time = candle_close - pd.Timedelta(seconds=150)
+            candle_close = quarter_start + timedelta(minutes=15)
+            scan_time = candle_close - timedelta(seconds=150)
             current_candle_id = candle_close.strftime('%Y-%m-%dT%H:%M:%SZ')
 
-            if abs((now - scan_time.to_pytimedelta()).total_seconds()) <= 1.0:
+            if abs((now - scan_time).total_seconds()) <= 1.0:
                 if last_scanned_candle_time != current_candle_id:
                     print(f"[{now.strftime('%H:%M:%S')}] Starting full market scan...")
                     
