@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "secret-e1a27a5d")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
@@ -41,28 +41,13 @@ BR_LAST_PROCESSED = {}
 
 # ----------------- ۱۱۰ نماد مارجین / فیوچرز (پایه USDT) -----------------
 MARGIN_SYMBOLS = [
-    'BTC_USDT', 'ETH_USDT', 'SOL_USDT', 'XRP_USDT', 'DOGE_USDT',
-    'ADA_USDT', 'AVAX_USDT', 'LINK_USDT', 'SUI_USDT', 'NEAR_USDT',
-    'DOT_USDT', 'TRX_USDT', 'LTC_USDT', 'BCH_USDT', 'UNI_USDT',
-    'APT_USDT', 'ICP_USDT', 'SHIB_USDT', 'PEPE_USDT', 'RENDER_USDT',
-    'FET_USDT', 'TAO_USDT', 'FTM_USDT', 'AAVE_USDT', 'OP_USDT',
-    'ARB_USDT', 'INJ_USDT', 'TIA_USDT', 'SEI_USDT', 'STX_USDT',
-    'FIL_USDT', 'ATOM_USDT', 'RUNE_USDT', 'GRT_USDT', 'LDO_USDT',
-    'KAS_USDT', 'WIF_USDT', 'BONK_USDT', 'FLOKI_USDT', 'GALA_USDT',
-    'SAND_USDT', 'MANA_USDT', 'AXS_USDT', 'THETA_USDT', 'EOS_USDT',
-    'FLOW_USDT', 'DYDX_USDT', 'CRV_USDT', 'MKR_USDT', 'SNX_USDT',
-    'ALGO_USDT', 'QNT_USDT', 'XTZ_USDT', 'IMX_USDT', 'MINA_USDT',
-    'CHZ_USDT', 'ZIL_USDT', 'ENJ_USDT', '1INCH_USDT', 'COMP_USDT',
-    'HOT_USDT', 'JASMY_USDT', 'WOO_USDT', 'BLUR_USDT', 'PENDLE_USDT',
-    'ORDI_USDT', 'SATS_USDT', 'BEAM_USDT', 'PYTH_USDT', 'JUP_USDT',
-    'WLD_USDT', 'STRK_USDT', 'ZK_USDT', 'NOT_USDT', 'TON_USDT',
-    'OM_USDT', 'CFX_USDT', 'NEO_USDT', 'IOTA_USDT', 'KAVA_USDT',
-    'KLAY_USDT', 'ROSE_USDT', 'MASK_USDT', 'AGIX_USDT', 'OCEAN_USDT',
-    'CELO_USDT', 'LRC_USDT', 'ANKR_USDT', 'AUDIO_USDT', 'BAT_USDT',
-    'BNT_USDT', 'DGB_USDT', 'GNO_USDT', 'KNC_USDT', 'ONT_USDT',
-    'SKL_USDT', 'SUSHI_USDT', 'YFI_USDT', 'ZRX_USDT', 'VET_USDT',
-    'ONDO_USDT', 'ENA_USDT', 'EIGEN_USDT', 'HBAR_USDT', 'POL_USDT',
-    'TWT_USDT', 'ASTR_USDT', 'PAXG_USDT', 'PENGU_USDT', 'TRUMP_USDT',
+    'PAXG_USDT', 'SOL_USDT', 'SUI_USDT', 'GALA_USDT', 'GRAM_USDT',
+    'HYPE_USDT', 'SLVON_USDT', 'ETH_USDT', 'POGE_USDT', 'ADA_USDT',
+    'XLM_USDT', 'ZEC_USDT', 'UNI_USDT', 'ASTER_USDT', 'S_USDT',
+    'LINK_USDT', 'FIL_USDT', 'DAT_USDT', 'WIF_USDT', 'LTC_USDT',
+    'NEAR_USDT', 'ONDO_USDT', 'ENA_USDT', 'RENDER_USDT', 'TRX_USDT',
+    'PENGU_USDT', 'XRP_USDT', 'CAKE_USDT', 'AVAX_USDT', 'NVDX_USDT',
+    'BTC_USDT', 'ALGO_USDT', 'DASH_USDT', 'PUMP_USDT', 'LDO_USDT',
 ]
 
 # ================= سرور داخلی برای زنده نگه داشتن Render =================
@@ -208,7 +193,6 @@ def _has_confirmed_selling_pressure(candle, previous_candle):
         and volume > previous_volume
     )
 
-
 # ================= استراتژی‌ها (سنسی، روند، پولبک) =================
 def check_sensi_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
@@ -333,7 +317,6 @@ def check_pullback_strategy(df, market_code, is_margin=True):
             f"🎯 حد سود ۲: {tp2:,.4f}\n"
             f"▫️ RSI: {rsi:.1f}")
 
-
 # ================= Break & Retest (SHORT only) =================
 def check_short_break_retest(df, market_code):
     """Track a strong lower-Bollinger breakout, then alert on bearish retest rejection."""
@@ -409,7 +392,6 @@ def check_short_break_retest(df, market_code):
                 "swing_high": float("-inf"),
             }
     return None
-
 
 # ================= Signal Tracker (ذخیره و پیگیری سیگنال‌ها) =================
 def load_tracker():
@@ -556,7 +538,6 @@ def telegram_stats_command_handler():
         except Exception as e:
             print(f"[Stats Polling Error] {e}")
             time.sleep(3)
-
 
 # ================= ثبت و ارسال سیگنال =================
 def extract_signal_details(msg):
