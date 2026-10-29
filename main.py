@@ -265,7 +265,6 @@ def check_trend_strategy(df, market_code, is_margin=True):
     return None
 
 def check_pullback_strategy(df, market_code, is_margin=True):
-    """Identify a bullish pullback in an established uptrend using the closed candle."""
     if df is None or len(df) < 55:
         return None
 
@@ -287,12 +286,10 @@ def check_pullback_strategy(df, market_code, is_margin=True):
     if pd.isna(atr) or atr <= 0:
         atr = close * 0.01
 
-    # Trend context: price above EMA200 and EMA200 rising versus five candles ago.
     ema_5_ago = df.iloc[-7]["ema200"]
     if pd.isna(ema_5_ago) or close <= ema or ema <= ema_5_ago:
         return None
 
-    # Pullback reaches the BB middle / EMA20 area, then closes back above it.
     touch_zone = low <= bb_middle * 1.01 and low >= bb_middle * 0.97
     bullish_reclaim = close > open_price and close > bb_middle and previous["close"] <= previous["bb_middle"] * 1.01
     if not (touch_zone and bullish_reclaim and 35 <= rsi <= 60):
@@ -319,7 +316,6 @@ def check_pullback_strategy(df, market_code, is_margin=True):
 
 # ================= Break & Retest (SHORT only) =================
 def check_short_break_retest(df, market_code):
-    """Track a strong lower-Bollinger breakout, then alert on bearish retest rejection."""
     if df is None or len(df) < 55:
         return None
 
@@ -393,7 +389,7 @@ def check_short_break_retest(df, market_code):
             }
     return None
 
-# ================= Signal Tracker (ذخیره و پیگیری سیگنال‌ها) =================
+# ================= Signal Tracker =================
 def load_tracker():
     global signal_tracker
     try:
@@ -445,7 +441,6 @@ def tracker_stats():
     win_rate = (wins / decided * 100) if decided > 0 else 0.0
     return total, wins, losses, open_signals, win_rate, ambiguous
 
-# ================= بولینگر اسکوییز (فیلتر فشردگی باند) =================
 def is_squeeze(df):
     try:
         bw = df.iloc[-2]["bandwidth"]
@@ -455,12 +450,11 @@ def is_squeeze(df):
     except Exception:
         return False
 
-# ================= حلقه پس‌زمینه رهگیری سیگنال‌ها =================
 def check_hit(symbol, direction, tp1, sl, current_price):
     if direction == "LONG":
         hit_tp = current_price >= tp1
         hit_sl = current_price <= sl
-    else:  # SHORT
+    else:
         hit_tp = current_price <= tp1
         hit_sl = current_price >= sl
     return hit_tp, hit_sl
@@ -504,7 +498,6 @@ def run_signal_tracker():
         except Exception as e:
             print(f"[Tracker Loop Error] {e}")
 
-# ================= Telegram /stats =================
 def telegram_stats_command_handler():
     print("Telegram /stats polling loop started.")
     offset = 0
@@ -539,7 +532,6 @@ def telegram_stats_command_handler():
             print(f"[Stats Polling Error] {e}")
             time.sleep(3)
 
-# ================= ثبت و ارسال سیگنال =================
 def extract_signal_details(msg):
     def num(pat):
         m = re.search(pat, msg)
@@ -562,13 +554,14 @@ def register_and_send(strategy_name, msg, symbol, is_margin=True):
 def run_scanner():
     print("Market scanner started successfully.")
     
-    test_msg = (
-        "🚀 <b>ربات اسکنر بیت‌پین (حالت دیباگ) روشن شد!</b>\n\n"
+    # پیام راه‌اندازی اولیه که فقط یک‌بار ارسال می‌شود
+    startup_msg = (
+        "🚀 <b>ربات اسکنر بیت‌پین روشن شد!</b>\n\n"
         "✅ اتصال به تلگرام برقرار است.\n"
-        " USDT 🔗 ارزهای پایه: \n"
-        "⏱ به محض رسیدن دقیقه ۰۱، اولین تست دریافت کندل انجام خواهد شد."
+        "🔗 پایش ۱۱۰ ارز تعهدی/فیوچرز فعال شد.\n"
+        "🎯 ربات فقط به محض یافتن سیگنال پیام ارسال خواهد کرد."
     )
-    send_telegram(test_msg)
+    send_telegram(startup_msg)
 
     last_scanned_candle_time = None
 
@@ -584,22 +577,14 @@ def run_scanner():
                 if last_scanned_candle_time != current_candle_id:
                     print(f"[{now.strftime('%H:%M:%S')}] Starting full market scan...")
                     
-                    success_count = 0
-                    total_checked = 0
-                    signals_found = 0
-
                     for symbol in MARGIN_SYMBOLS:
-                        total_checked += 1
-
                         df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=100)
                         if df is not None and not df.empty:
-                            success_count += 1
                             df = calculate_indicators(df)
                             if df is not None:
                                 break_retest_res = check_short_break_retest(df, symbol)
                                 if break_retest_res:
                                     register_and_send("break_retest_short", break_retest_res, symbol, is_margin=True)
-                                    signals_found += 1
 
                                 if is_squeeze(df):
                                     continue
@@ -607,33 +592,23 @@ def run_scanner():
                                 sensi_res = check_sensi_strategy(df, symbol, is_margin=True)
                                 if sensi_res:
                                     register_and_send("sensi", sensi_res, symbol, is_margin=True)
-                                    signals_found += 1
                                     continue
 
                                 trend_res = check_trend_strategy(df, symbol, is_margin=True)
                                 if trend_res:
                                     register_and_send("trend", trend_res, symbol, is_margin=True)
-                                    signals_found += 1
                                     continue
 
                                 pullback_res = check_pullback_strategy(df, symbol, is_margin=True)
                                 if pullback_res:
                                     register_and_send("pullback", pullback_res, symbol, is_margin=True)
-                                    signals_found += 1
 
                         time.sleep(0.3)
 
-                    debug_report = (
-                        f"📊 <b>گزارش تست سلامت ربات (دیباگ)</b>\n\n"
-                        f"▫️ تعداد کل ارزهای بررسی‌شده در تست: {total_checked}\n"
-                        f"▫️ دریافت موفق کندل از بیت‌پین: <b>{success_count} ارز</b>\n"
-                        f"▫️ سیگنال‌های یافت شده: {signals_found}\n\n"
-                        f"✅ <i>ارتباط API و منطق ربات کاملاً فعال است و بدون خطا کار می‌کند.</i>"
-                    )
-                    send_telegram(debug_report)
+                    # گزارش سلامت دوره‌ای به طور کامل حذف شد تا دیگر پیام اضافی ارسال نشود
 
                     last_scanned_candle_time = current_candle_id
-                    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Scan & Debug finished.")
+                    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Scan finished.")
 
             time.sleep(0.25)
 
