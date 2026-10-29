@@ -564,7 +564,7 @@ def register_and_send(strategy_name, msg, symbol, is_margin=True):
 # ================= حلقه اصلی پایش و اسکن بازار =================
 def run_scanner():
     print("Market scanner started successfully.")
-    
+
     test_msg = (
         "🚀 <b>ربات اسکنر بیت‌پین (حالت دیباگ) روشن شد!</b>\n\n"
         "✅ اتصال به تلگرام برقرار است.\n"
@@ -573,7 +573,7 @@ def run_scanner():
     )
     send_telegram(test_msg)
 
-    last_scanned_candle_time = None
+    last_scanned_candle_time = {"open": None, "close": None}
 
     while True:
         try:
@@ -583,58 +583,47 @@ def run_scanner():
             scan_time = candle_close - timedelta(seconds=150)
             current_candle_id = candle_close.strftime('%Y-%m-%dT%H:%M:%SZ')
 
-            if abs((now - scan_time).total_seconds()) <= 1.0:
-                if last_scanned_candle_time != current_candle_id:
-                    print(f"[{now.strftime('%H:%M:%S')}] Starting full market scan...")
-                    
-                    success_count = 0
-                    total_checked = 0
-                    signals_found = 0
+            if abs((now - quarter_start).total_seconds()) <= 1.0:
+                scan_phase = "open"
+            elif abs((now - scan_time).total_seconds()) <= 1.0:
+                scan_phase = "close"
+            else:
+                scan_phase = None
 
-                    for symbol in MARGIN_SYMBOLS:
-                        total_checked += 1
+            if scan_phase and last_scanned_candle_time[scan_phase] != current_candle_id:
+                print(f"[{now.strftime('%H:%M:%S')}] Starting {scan_phase} market scan...")
 
-                        df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=300)
-                        if df is not None and not df.empty:
-                            success_count += 1
-                            df = calculate_indicators(df)
-                            if df is not None:
+                for symbol in MARGIN_SYMBOLS:
+                    df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=300)
+                    if df is not None and not df.empty:
+                        df = calculate_indicators(df)
+                        if df is not None:
+                            if scan_phase == "close":
                                 break_retest_res = check_short_break_retest(df, symbol)
                                 if break_retest_res:
                                     register_and_send("break_retest_short", break_retest_res, symbol, is_margin=True)
-                                    signals_found += 1
 
-                                if is_squeeze(df):
-                                    continue
+                            if is_squeeze(df):
+                                time.sleep(0.3)
+                                continue
 
+                            if scan_phase == "close":
                                 sensi_res = check_sensi_strategy(df, symbol, is_margin=True)
                                 if sensi_res:
                                     register_and_send("sensi", sensi_res, symbol, is_margin=True)
-                                    signals_found += 1
-
+                            else:
                                 trend_res = check_trend_strategy(df, symbol, is_margin=True)
                                 if trend_res:
                                     register_and_send("trend", trend_res, symbol, is_margin=True)
-                                    signals_found += 1
 
                                 pullback_res = check_pullback_strategy(df, symbol, is_margin=True)
                                 if pullback_res:
                                     register_and_send("pullback", pullback_res, symbol, is_margin=True)
-                                    signals_found += 1
 
-                        time.sleep(0.3)
+                    time.sleep(0.3)
 
-                    debug_report = (
-                        f"📊 <b>گزارش تست سلامت ربات (دیباگ)</b>\n\n"
-                        f"▫️ تعداد کل ارزهای بررسی‌شده در تست: {total_checked}\n"
-                        f"▫️ دریافت موفق کندل از بیت‌پین: <b>{success_count} ارز</b>\n"
-                        f"▫️ سیگنال‌های یافت شده: {signals_found}\n\n"
-                        f"✅ <i>ارتباط API و منطق ربات کاملاً فعال است و بدون خطا کار می‌کند.</i>"
-                    )
-                    send_telegram(debug_report)
-
-                    last_scanned_candle_time = current_candle_id
-                    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Scan & Debug finished.")
+                last_scanned_candle_time[scan_phase] = current_candle_id
+                print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {scan_phase.capitalize()} scan finished.")
 
             time.sleep(0.25)
 
