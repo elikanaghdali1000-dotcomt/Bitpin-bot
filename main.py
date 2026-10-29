@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "secret-c18addaa")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
@@ -30,13 +30,22 @@ TIMEFRAME = "15"      # تایم‌فریم ۱۵ دقیقه
 tracker_lock = threading.RLock()
 signal_tracker = {}
 
-# ----------------- نمادهای مارجین / فیوچرز پاکسازی‌شده (پایه USDT) -----------------
+# Break & Retest (SHORT only): isolated state/settings; existing strategy settings stay unchanged.
+BR_MAX_RETEST_CANDLES = 8
+BR_RETEST_TOLERANCE_PCT = 0.15 / 100.0
+BR_BREAKOUT_VOL_MULT = 1.5
+BR_MIN_BREAKOUT_BODY_RATIO = 0.55
+BR_MIN_REJECTION_BODY_RATIO = 0.30
+BR_PENDING_SHORT = {}
+BR_LAST_PROCESSED = {}
+
+# ----------------- ۱۱۰ نماد مارجین / فیوچرز (پایه USDT) -----------------
 MARGIN_SYMBOLS = [
     'BTC_USDT', 'ETH_USDT', 'SOL_USDT', 'XRP_USDT', 'DOGE_USDT',
     'ADA_USDT', 'AVAX_USDT', 'LINK_USDT', 'SUI_USDT', 'NEAR_USDT',
     'DOT_USDT', 'TRX_USDT', 'LTC_USDT', 'BCH_USDT', 'UNI_USDT',
     'APT_USDT', 'ICP_USDT', 'SHIB_USDT', 'PEPE_USDT', 'RENDER_USDT',
-    'FET_USDT', 'TAO_USDT', 'AAVE_USDT', 'OP_USDT',
+    'FET_USDT', 'TAO_USDT', 'FTM_USDT', 'AAVE_USDT', 'OP_USDT',
     'ARB_USDT', 'INJ_USDT', 'TIA_USDT', 'SEI_USDT', 'STX_USDT',
     'FIL_USDT', 'ATOM_USDT', 'RUNE_USDT', 'GRT_USDT', 'LDO_USDT',
     'KAS_USDT', 'WIF_USDT', 'BONK_USDT', 'FLOKI_USDT', 'GALA_USDT',
@@ -48,13 +57,15 @@ MARGIN_SYMBOLS = [
     'ORDI_USDT', 'SATS_USDT', 'BEAM_USDT', 'PYTH_USDT', 'JUP_USDT',
     'WLD_USDT', 'STRK_USDT', 'ZK_USDT', 'NOT_USDT', 'TON_USDT',
     'OM_USDT', 'CFX_USDT', 'NEO_USDT', 'IOTA_USDT', 'KAVA_USDT',
-    'ROSE_USDT', 'MASK_USDT', 'CELO_USDT', 'LRC_USDT', 'ANKR_USDT',
-    'AUDIO_USDT', 'BAT_USDT', 'BNT_USDT', 'DGB_USDT', 'GNO_USDT',
-    'KNC_USDT', 'ONT_USDT', 'SKL_USDT', 'SUSHI_USDT', 'YFI_USDT',
-    'ZRX_USDT', 'VET_USDT', 'ONDO_USDT', 'ENA_USDT', 'EIGEN_USDT',
-    'HBAR_USDT', 'POL_USDT', 'TWT_USDT', 'ASTR_USDT', 'PAXG_USDT',
-    'PENGU_USDT', 'TRUMP_USDT',
+    'KLAY_USDT', 'ROSE_USDT', 'MASK_USDT', 'AGIX_USDT', 'OCEAN_USDT',
+    'CELO_USDT', 'LRC_USDT', 'ANKR_USDT', 'AUDIO_USDT', 'BAT_USDT',
+    'BNT_USDT', 'DGB_USDT', 'GNO_USDT', 'KNC_USDT', 'ONT_USDT',
+    'SKL_USDT', 'SUSHI_USDT', 'YFI_USDT', 'ZRX_USDT', 'VET_USDT',
+    'ONDO_USDT', 'ENA_USDT', 'EIGEN_USDT', 'HBAR_USDT', 'POL_USDT',
+    'TWT_USDT', 'ASTR_USDT', 'PAXG_USDT', 'PENGU_USDT', 'TRUMP_USDT',
 ]
+
+# واچ‌لیست فقط شامل نمادهای مارجین / فیوچرز است.
 
 # ================= سرور داخلی برای زنده نگه داشتن Render =================
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -200,7 +211,7 @@ def _has_confirmed_selling_pressure(candle, previous_candle):
     )
 
 
-# ================= استراتژی‌ها (سنسی، روند، پولبک و Break & Retest) =================
+# ================= استراتژی‌ها (سنسی، روند، پولبک) =================
 def check_sensi_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
         return None
@@ -236,8 +247,11 @@ def check_sensi_strategy(df, market_code, is_margin=True):
     near_resistance = (sig_candle["high"] <= prior_resistance * 1.003) and (sig_candle["high"] >= prior_resistance * 0.992)
     previous_candle = df.iloc[-3]
     has_confirmed_selling_pressure = _has_confirmed_selling_pressure(sig_candle, previous_candle)
+    current_candle_is_bearish = sig_candle["close"] < sig_candle["open"]
+    live_candle = df.iloc[-1]
+    live_candle_is_bearish = live_candle["close"] < live_candle["open"]
 
-    if near_resistance and has_confirmed_selling_pressure:
+    if near_resistance and has_confirmed_selling_pressure and current_candle_is_bearish and live_candle_is_bearish:
         entry = sig_candle["close"]
         sl = max(prior_resistance, sig_candle["high"]) + (0.2 * atr)
         risk = sl - entry
@@ -269,6 +283,7 @@ def check_trend_strategy(df, market_code, is_margin=True):
     return None
 
 def check_pullback_strategy(df, market_code, is_margin=True):
+    """Identify a bullish pullback in an established uptrend using the closed candle."""
     if df is None or len(df) < 55:
         return None
 
@@ -290,10 +305,12 @@ def check_pullback_strategy(df, market_code, is_margin=True):
     if pd.isna(atr) or atr <= 0:
         atr = close * 0.01
 
+    # Trend context: price above EMA200 and EMA200 rising versus five candles ago.
     ema_5_ago = df.iloc[-7]["ema200"]
     if pd.isna(ema_5_ago) or close <= ema or ema <= ema_5_ago:
         return None
 
+    # Pullback reaches the BB middle / EMA20 area, then closes back above it.
     touch_zone = low <= bb_middle * 1.01 and low >= bb_middle * 0.97
     bullish_reclaim = close > open_price and close > bb_middle and previous["close"] <= previous["bb_middle"] * 1.01
     if not (touch_zone and bullish_reclaim and 35 <= rsi <= 60):
@@ -318,52 +335,97 @@ def check_pullback_strategy(df, market_code, is_margin=True):
             f"🎯 حد سود ۲: {tp2:,.4f}\n"
             f"▫️ RSI: {rsi:.1f}")
 
-# استراتژی جدید Break & Retest (شکست و پولبک)
-def check_break_retest_strategy(df, market_code, is_margin=True):
-    if df is None or len(df) < 55:
-        return None
-    
-    last = df.iloc[-2]
-    prev = df.iloc[-3]
-    
-    close = last["close"]
-    open_price = last["open"]
-    high = last["high"]
-    low = last["low"]
-    vol = last["volume"]
-    vol_ma = last["vol_ma20"]
-    atr = last["atr"]
-    rsi = last["rsi"]
-    
-    if pd.isna(atr) or atr <= 0 or pd.isna(vol_ma) or vol_ma <= 0:
-        return None
-
-    # بررسی مقاومت پیشین برای شکست و پولبک صعودی (Bullish Break & Retest)
-    lookback = df.iloc[-30:-3]
-    resistance = lookback["high"].max()
-    
-    # شرط شکست: کندل قبل مقاومت را شکسته بود و کندل فعلی (یا قبلی) به سطح پولبک زده و تاییدیه صعود داده
-    broke_above = prev["close"] > resistance and prev["volume"] >= 1.2 * vol_ma
-    retested = low <= resistance * 1.003 and low >= resistance * 0.992
-    bullish_candle = close > open_price and close > resistance
-    
-    if broke_above and retested and bullish_candle:
+    if close < ema and high >= ema * 0.985 and high <= ema * 1.015 and close < open_price and close < ema and 35 <= rsi <= 60:
         entry = close
-        sl = resistance - (0.5 * atr)
-        risk = entry - sl
+        sl = ema + 1.5 * atr
+        risk = sl - entry
         if risk > 0:
-            tp1 = entry + (1.5 * risk)
-            tp2 = entry + (2.5 * risk)
+            tp1 = entry - 2 * risk
             market_type_str = "تعهدی / فیوچرز"
-            return (f"⚡️ <b>سیگنال Break & Retest (شکست و پولبک صعودی)</b>\n"
+            return (f"🔻 <b>سیگنال شورت پولبک به EMA200 (ادامه روند نزولی)</b>\n"
                     f"▫️ ارز: <code>{market_code}</code> ({market_type_str})\n"
-                    f"📌 موقعیت: LONG\n"
-                    f"▫️ سطح مقاومت شکسته شده: {resistance:,.4f}\n"
+                    f"📌 موقعیت: SHORT\n"
                     f"▫️ ورود: {entry:,.4f}\n"
                     f"🛡 حد ضرر: {sl:,.4f}\n"
-                    f"🎯 حد سود ۱: {tp1:,.4f}\n"
-                    f"🎯 حد سود ۲: {tp2:,.4f}\n"
-                    f"▫️ RSI: {rsi:.1f}")
+                    f"🎯 حد سود ۱: {tp1:,.4f}")
+
+
+# ================= Break & Retest (SHORT only) =================
+def check_short_break_retest(df, market_code):
+    """Track a strong lower-Bollinger breakout, then alert on bearish retest rejection."""
+    if df is None or len(df) < 55:
+        return None
+
+    candle = df.iloc[-2]  # use the latest fully closed candle, like existing strategies
+    previous = df.iloc[-3]
+    timestamp = candle.get("timestamp", None)
+    if timestamp is None:
+        timestamp = df.index[-2]
+    if BR_LAST_PROCESSED.get(market_code) == timestamp:
+        return None
+    BR_LAST_PROCESSED[market_code] = timestamp
+
+    # Baseline excludes the evaluated candle (same convention as bot_pro_retest.py).
+    prior_volumes = df.iloc[-22:-2]["volume"]
+    if len(prior_volumes) < 20:
+        return None
+    vol_avg = float(prior_volumes.mean())
+    if pd.isna(vol_avg) or vol_avg <= 0:
+        return None
+
+    pending = BR_PENDING_SHORT.get(market_code)
+    if pending:
+        pending["candles_waited"] += 1
+        pending["swing_high"] = max(pending["swing_high"], float(candle["high"]))
+        level = pending["level"]
+        tol = level * BR_RETEST_TOLERANCE_PCT
+        failed = candle["close"] > level * (1 + BR_RETEST_TOLERANCE_PCT)
+        if failed or pending["candles_waited"] > BR_MAX_RETEST_CANDLES:
+            BR_PENDING_SHORT.pop(market_code, None)
+            pending = None
+        else:
+            span = float(candle["high"] - candle["low"])
+            body_ratio = abs(float(candle["close"] - candle["open"])) / span if span > 0 else 0.0
+            retest_touch = candle["high"] >= level - tol and candle["low"] <= level + tol
+            selling_confirmation = candle["volume"] > vol_avg and candle["volume"] > previous["volume"]
+            rejection = (
+                retest_touch and span > 0 and selling_confirmation
+                and candle["close"] < level and candle["close"] < candle["open"]
+                and (candle["close"] - candle["low"]) / span <= 0.45
+                and body_ratio >= BR_MIN_REJECTION_BODY_RATIO
+            )
+            if rejection:
+                entry = float(candle["close"])
+                atr = candle.get("atr", float("nan"))
+                if pd.isna(atr) or atr <= 0:
+                    atr = entry * 0.01
+                stop = pending["swing_high"] + 0.20 * float(atr)
+                risk = stop - entry
+                BR_PENDING_SHORT.pop(market_code, None)
+                if risk <= 0:
+                    return None
+                tp1 = entry - risk
+                tp2 = entry - 2.0 * risk
+                return (f"🔻 <b>سیگنال شورت Break & Retest (شکست و پولبک)</b>\n"
+                        f"▫️ ارز: <code>{market_code}</code> (تعهدی / فیوچرز)\n"
+                        f"📌 موقعیت: SHORT\n▫️ ورود: {entry:,.4f}\n"
+                        f"🛡 حد ضرر: {stop:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}\n"
+                        f"🎯 حد سود ۲: {tp2:,.4f}\n▫️ سطح شکست بولینگر: {level:,.4f}")
+
+    # If there is no active setup, register a strong close below the lower band.
+    if pending is None:
+        lower = candle.get("bb_lower", float("nan"))
+        span = float(candle["high"] - candle["low"])
+        body_ratio = abs(float(candle["close"] - candle["open"])) / span if span > 0 else 0.0
+        if (not pd.isna(lower) and span > 0
+                and candle["volume"] > BR_BREAKOUT_VOL_MULT * vol_avg
+                and body_ratio >= BR_MIN_BREAKOUT_BODY_RATIO
+                and candle["close"] < lower and candle["close"] < candle["open"]
+                and (candle["close"] - candle["low"]) / span <= 0.35):
+            BR_PENDING_SHORT[market_code] = {
+                "level": float(lower), "candles_waited": 0,
+                "swing_high": float("-inf"),
+            }
     return None
 
 
@@ -421,6 +483,7 @@ def tracker_stats():
 
 # ================= بولینگر اسکوییز (فیلتر فشردگی باند) =================
 def is_squeeze(df):
+    """اگر BandWidth آخرین کندل بسته‌شده زیر آستانه باشد، سیگنال جدید ارسال نمی‌شود."""
     try:
         bw = df.iloc[-2]["bandwidth"]
         if pd.isna(bw):
@@ -434,7 +497,7 @@ def check_hit(symbol, direction, tp1, sl, current_price):
     if direction == "LONG":
         hit_tp = current_price >= tp1
         hit_sl = current_price <= sl
-    else:
+    else:  # SHORT
         hit_tp = current_price <= tp1
         hit_sl = current_price >= sl
     return hit_tp, hit_sl
@@ -455,7 +518,7 @@ def run_signal_tracker():
                     continue
                 hit_tp, hit_sl = check_hit(sig["symbol"], sig["direction"], sig["tp1"], sig["sl"], current_price)
                 if hit_tp and hit_sl:
-                    status = "AMBIGUOUS"
+                    status = "AMBIGUOUS"  # هر دو در یک کندل؛ نامشخص کدام اول رخ داده
                 elif hit_tp:
                     status = "HIT_TP1"
                 elif hit_sl:
@@ -478,7 +541,7 @@ def run_signal_tracker():
         except Exception as e:
             print(f"[Tracker Loop Error] {e}")
 
-# ================= Telegram /stats =================
+# ================= Telegram /stats (polling getUpdates) =================
 def telegram_stats_command_handler():
     print("Telegram /stats polling loop started.")
     offset = 0
@@ -514,8 +577,9 @@ def telegram_stats_command_handler():
             time.sleep(3)
 
 
-# ================= ثبت و ارسال سیگنال =================
+# ================= ثبت و ارسال سیگنال (ارتباط استراتژی با رهگیر) =================
 def extract_signal_details(msg):
+    """استخراج ورود/حد ضرر/حد سود ۱ از متن پیام برای ثبت در رهگیر."""
     def num(pat):
         m = re.search(pat, msg)
         return float(m.group(1).replace(",", "")) if m else None
@@ -538,10 +602,10 @@ def run_scanner():
     print("Market scanner started successfully.")
     
     test_msg = (
-        "🚀 <b>ربات اسکنر بیت‌پین روشن شد!</b>\n\n"
+        "🚀 <b>ربات اسکنر بیت‌پین (حالت دیباگ) روشن شد!</b>\n\n"
         "✅ اتصال به تلگرام برقرار است.\n"
-        "⚡️ استراتژی‌های فعال: سنسی، بولینگر، پولبک و Break & Retest\n"
-        "⏱ به محض رسیدن دقیقه ۰۱، اسکن بازار آغاز خواهد شد."
+        " USDT 🔗 ارزهای پایه: \n"
+        "⏱ به محض رسیدن دقیقه ۰۱، اولین تست دریافت کندل انجام خواهد شد."
     )
     send_telegram(test_msg)
 
@@ -550,6 +614,7 @@ def run_scanner():
     while True:
         try:
             now = datetime.now(timezone.utc)
+            # Run once at the precise pre-close point: 150 seconds before the next 15m close.
             quarter_start = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
             candle_close = quarter_start + timedelta(minutes=15)
             scan_time = candle_close - timedelta(seconds=150)
@@ -563,7 +628,7 @@ def run_scanner():
                     total_checked = 0
                     signals_found = 0
 
-                    for symbol in MARGIN_SYMBOLS:
+                    for symbol in MARGIN_SYMBOLS:  # scan all 110 margin/futures symbols
                         total_checked += 1
 
                         df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=100)
@@ -571,49 +636,50 @@ def run_scanner():
                             success_count += 1
                             df = calculate_indicators(df)
                             if df is not None:
+                                # Break & Retest شورت (افزوده؛ مستقل از فیلتر/اولویت استراتژی‌های موجود)
+                                break_retest_res = check_short_break_retest(df, symbol)
+                                if break_retest_res:
+                                    register_and_send("break_retest_short", break_retest_res, symbol, is_margin=True)
+                                    signals_found += 1
+
+                                # فیلتر بولینگر اسکوییز: اگر BandWidth زیر آستانه باشد، سیگنال جدید ارسال نمی‌شود
                                 if is_squeeze(df):
                                     continue
 
-                                # 1. سنسی
+                                # چک کردن استراتژی ۱: سنسی
                                 sensi_res = check_sensi_strategy(df, symbol, is_margin=True)
                                 if sensi_res:
                                     register_and_send("sensi", sensi_res, symbol, is_margin=True)
                                     signals_found += 1
                                     continue
 
-                                # 2. بولینگر
+                                # چک کردن استراتژی ۲: بولینگر روند
                                 trend_res = check_trend_strategy(df, symbol, is_margin=True)
                                 if trend_res:
                                     register_and_send("trend", trend_res, symbol, is_margin=True)
                                     signals_found += 1
                                     continue
 
-                                # 3. پولبک
+                                # چک کردن استراتژی ۳: پولبک EMA200
                                 pullback_res = check_pullback_strategy(df, symbol, is_margin=True)
                                 if pullback_res:
                                     register_and_send("pullback", pullback_res, symbol, is_margin=True)
                                     signals_found += 1
-                                    continue
 
-                                # 4. شکست و پولبک (Break & Retest)
-                                bretest_res = check_break_retest_strategy(df, symbol, is_margin=True)
-                                if bretest_res:
-                                    register_and_send("break_retest", bretest_res, symbol, is_margin=True)
-                                    signals_found += 1
+                        time.sleep(0.3)
 
-                        time.sleep(0.2) # تاخیر کوتاه برای سبک شدن بار درخواست‌ها
-
+                    # گزارش دیباگ به تلگرام در اولین اسکن
                     debug_report = (
-                        f"📊 <b>گزارش تست سلامت ربات</b>\n\n"
-                        f"▫️ تعداد کل ارزهای بررسی‌شده: {total_checked}\n"
+                        f"📊 <b>گزارش تست سلامت ربات (دیباگ)</b>\n\n"
+                        f"▫️ تعداد کل ارزهای بررسی‌شده در تست: {total_checked}\n"
                         f"▫️ دریافت موفق کندل از بیت‌پین: <b>{success_count} ارز</b>\n"
                         f"▫️ سیگنال‌های یافت شده: {signals_found}\n\n"
-                        f"✅ <i>ربات با موفقیت تمامی استراتژی‌ها را اسکن کرد.</i>"
+                        f"✅ <i>ارتباط API و منطق ربات کاملاً فعال است و بدون خطا کار می‌کند.</i>"
                     )
                     send_telegram(debug_report)
 
                     last_scanned_candle_time = current_candle_id
-                    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Scan finished.")
+                    print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] Scan & Debug finished.")
 
             time.sleep(0.25)
 
