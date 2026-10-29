@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "secret-c18addaa")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "*******")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
@@ -64,8 +64,6 @@ MARGIN_SYMBOLS = [
     'ONDO_USDT', 'ENA_USDT', 'EIGEN_USDT', 'HBAR_USDT', 'POL_USDT',
     'TWT_USDT', 'ASTR_USDT', 'PAXG_USDT', 'PENGU_USDT', 'TRUMP_USDT',
 ]
-
-# واچ‌لیست فقط شامل نمادهای مارجین / فیوچرز است.
 
 # ================= سرور داخلی برای زنده نگه داشتن Render =================
 class SimpleHandler(BaseHTTPRequestHandler):
@@ -335,20 +333,6 @@ def check_pullback_strategy(df, market_code, is_margin=True):
             f"🎯 حد سود ۲: {tp2:,.4f}\n"
             f"▫️ RSI: {rsi:.1f}")
 
-    if close < ema and high >= ema * 0.985 and high <= ema * 1.015 and close < open_price and close < ema and 35 <= rsi <= 60:
-        entry = close
-        sl = ema + 1.5 * atr
-        risk = sl - entry
-        if risk > 0:
-            tp1 = entry - 2 * risk
-            market_type_str = "تعهدی / فیوچرز"
-            return (f"🔻 <b>سیگنال شورت پولبک به EMA200 (ادامه روند نزولی)</b>\n"
-                    f"▫️ ارز: <code>{market_code}</code> ({market_type_str})\n"
-                    f"📌 موقعیت: SHORT\n"
-                    f"▫️ ورود: {entry:,.4f}\n"
-                    f"🛡 حد ضرر: {sl:,.4f}\n"
-                    f"🎯 حد سود ۱: {tp1:,.4f}")
-
 
 # ================= Break & Retest (SHORT only) =================
 def check_short_break_retest(df, market_code):
@@ -356,7 +340,7 @@ def check_short_break_retest(df, market_code):
     if df is None or len(df) < 55:
         return None
 
-    candle = df.iloc[-2]  # use the latest fully closed candle, like existing strategies
+    candle = df.iloc[-2]  
     previous = df.iloc[-3]
     timestamp = candle.get("timestamp", None)
     if timestamp is None:
@@ -365,7 +349,6 @@ def check_short_break_retest(df, market_code):
         return None
     BR_LAST_PROCESSED[market_code] = timestamp
 
-    # Baseline excludes the evaluated candle (same convention as bot_pro_retest.py).
     prior_volumes = df.iloc[-22:-2]["volume"]
     if len(prior_volumes) < 20:
         return None
@@ -412,7 +395,6 @@ def check_short_break_retest(df, market_code):
                         f"🛡 حد ضرر: {stop:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}\n"
                         f"🎯 حد سود ۲: {tp2:,.4f}\n▫️ سطح شکست بولینگر: {level:,.4f}")
 
-    # If there is no active setup, register a strong close below the lower band.
     if pending is None:
         lower = candle.get("bb_lower", float("nan"))
         span = float(candle["high"] - candle["low"])
@@ -483,7 +465,6 @@ def tracker_stats():
 
 # ================= بولینگر اسکوییز (فیلتر فشردگی باند) =================
 def is_squeeze(df):
-    """اگر BandWidth آخرین کندل بسته‌شده زیر آستانه باشد، سیگنال جدید ارسال نمی‌شود."""
     try:
         bw = df.iloc[-2]["bandwidth"]
         if pd.isna(bw):
@@ -518,7 +499,7 @@ def run_signal_tracker():
                     continue
                 hit_tp, hit_sl = check_hit(sig["symbol"], sig["direction"], sig["tp1"], sig["sl"], current_price)
                 if hit_tp and hit_sl:
-                    status = "AMBIGUOUS"  # هر دو در یک کندل؛ نامشخص کدام اول رخ داده
+                    status = "AMBIGUOUS"
                 elif hit_tp:
                     status = "HIT_TP1"
                 elif hit_sl:
@@ -541,7 +522,7 @@ def run_signal_tracker():
         except Exception as e:
             print(f"[Tracker Loop Error] {e}")
 
-# ================= Telegram /stats (polling getUpdates) =================
+# ================= Telegram /stats =================
 def telegram_stats_command_handler():
     print("Telegram /stats polling loop started.")
     offset = 0
@@ -577,9 +558,8 @@ def telegram_stats_command_handler():
             time.sleep(3)
 
 
-# ================= ثبت و ارسال سیگنال (ارتباط استراتژی با رهگیر) =================
+# ================= ثبت و ارسال سیگنال =================
 def extract_signal_details(msg):
-    """استخراج ورود/حد ضرر/حد سود ۱ از متن پیام برای ثبت در رهگیر."""
     def num(pat):
         m = re.search(pat, msg)
         return float(m.group(1).replace(",", "")) if m else None
@@ -614,7 +594,6 @@ def run_scanner():
     while True:
         try:
             now = datetime.now(timezone.utc)
-            # Run once at the precise pre-close point: 150 seconds before the next 15m close.
             quarter_start = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
             candle_close = quarter_start + timedelta(minutes=15)
             scan_time = candle_close - timedelta(seconds=150)
@@ -628,7 +607,7 @@ def run_scanner():
                     total_checked = 0
                     signals_found = 0
 
-                    for symbol in MARGIN_SYMBOLS:  # scan all 110 margin/futures symbols
+                    for symbol in MARGIN_SYMBOLS:
                         total_checked += 1
 
                         df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=100)
@@ -636,31 +615,26 @@ def run_scanner():
                             success_count += 1
                             df = calculate_indicators(df)
                             if df is not None:
-                                # Break & Retest شورت (افزوده؛ مستقل از فیلتر/اولویت استراتژی‌های موجود)
                                 break_retest_res = check_short_break_retest(df, symbol)
                                 if break_retest_res:
                                     register_and_send("break_retest_short", break_retest_res, symbol, is_margin=True)
                                     signals_found += 1
 
-                                # فیلتر بولینگر اسکوییز: اگر BandWidth زیر آستانه باشد، سیگنال جدید ارسال نمی‌شود
                                 if is_squeeze(df):
                                     continue
 
-                                # چک کردن استراتژی ۱: سنسی
                                 sensi_res = check_sensi_strategy(df, symbol, is_margin=True)
                                 if sensi_res:
                                     register_and_send("sensi", sensi_res, symbol, is_margin=True)
                                     signals_found += 1
                                     continue
 
-                                # چک کردن استراتژی ۲: بولینگر روند
                                 trend_res = check_trend_strategy(df, symbol, is_margin=True)
                                 if trend_res:
                                     register_and_send("trend", trend_res, symbol, is_margin=True)
                                     signals_found += 1
                                     continue
 
-                                # چک کردن استراتژی ۳: پولبک EMA200
                                 pullback_res = check_pullback_strategy(df, symbol, is_margin=True)
                                 if pullback_res:
                                     register_and_send("pullback", pullback_res, symbol, is_margin=True)
@@ -668,7 +642,6 @@ def run_scanner():
 
                         time.sleep(0.3)
 
-                    # گزارش دیباگ به تلگرام در اولین اسکن
                     debug_report = (
                         f"📊 <b>گزارش تست سلامت ربات (دیباگ)</b>\n\n"
                         f"▫️ تعداد کل ارزهای بررسی‌شده در تست: {total_checked}\n"
