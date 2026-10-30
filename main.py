@@ -811,20 +811,27 @@ def main_scanner_loop():
 
 # ================= نقطه شروع برنامه =================
 if __name__ == "__main__":
-    print("Starting HTTP Server thread...")
-    threading.Thread(target=run_http_server, daemon=True).start()
-    
-    print("Starting Self-Ping thread...")
-    threading.Thread(target=self_ping, daemon=True).start()
-    
-    print("Starting Signal Tracker thread...")
-    threading.Thread(target=run_signal_tracker, daemon=True).start()
-    
-    print("Starting Telegram Updates thread...")
-    threading.Thread(target=telegram_stats_command_handler, daemon=True).start()
+    try:
+        print("Starting HTTP Server thread...")
+        threading.Thread(target=run_http_server, daemon=True).start()
+        
+        print("Starting Self-Ping thread...")
+        threading.Thread(target=self_ping, daemon=True).start()
+        
+        print("Starting Signal Tracker thread...")
+        threading.Thread(target=run_signal_tracker, daemon=True).start()
+        
+        print("Starting Telegram Updates thread...")
+        threading.Thread(target=telegram_stats_command_handler, daemon=True).start()
 
-    print("Starting Main Scanner Loop...")
-    main_scanner_loop()
+        print("Starting Main Scanner Loop...")
+        main_scanner_loop()
+    except Exception as e:
+        import traceback
+        print("CRITICAL ERROR IN MAIN PROGRAM:")
+        traceback.print_exc()
+        time.sleep(300)  # نگه داشتن کانتینر برای خواندن لاگ
+
 
 
                 # بررسی روی کندل‌های بسته‌شده
