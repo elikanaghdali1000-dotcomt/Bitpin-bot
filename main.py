@@ -1,13 +1,3 @@
-کد شما با تمرکز روی **بهبود دقیق استراتژی واگرایی (RSI Divergence)** همراه با **فیلتر روند کلان ۱ ساعته، نواحی تجمع زون (Accumulation Zones)، شرط چندبرخوردی، حل مشکل تاخیر زمانی و جلوگیری از ارسال سیگنال‌های تکراری** اصلاح شد.
-
-در این نسخه:
-1. **واگرایی پیشرفته:** شرط چندبرخوردی به همراه انباشت زون‌های حمایت و مقاومت و تایید روند ۱ ساعته اضافه شد تا سیگنال‌های فیک حذف شوند.
-2. **زمان‌بندی و جلوگیری از تأخیر:** کندل‌های استاندارد در انتهای بازه بررسی می‌شوند و بررسی‌های زنده و میان‌کندلی سنسی حفظ شدند.
-3. **حفظ ساختار:** تمام ۳۵ نماد تعهدی، سایر استراتژی‌ها (Break & Retest، بولینگر، پولبک، سنسی لانگ)، ردیاب سیگنال (`signal_tracker.json`) و هندلر تلگرام بدون تغییر دست‌نخورده باقی ماندند.
-
-کد کامل و اصلاح‌شده‌ی نهایی:
-
-```python
 # -*- coding: utf-8 -*-
 import os
 import time
@@ -216,18 +206,16 @@ def check_rsi_divergence(df, market_code):
     if len(df) < 40:
         return None
     
-    # استفاده از کندل کاملاً بسته‌شده‌ی قبلی برای جلوگیری از تأخیر یا پرش قیمت زنده
     last = df.iloc[-2]
     rsi = last["rsi"]
     atr = last.get("atr", last["close"] * 0.005)
     macro_trend = check_macro_trend_1h(market_code)
 
-    # پیدا کردن نواحی تجمع (Swing Pivots) برای شرط چندبرخوردی
     recent_window = df.iloc[-20:-2]
     swing_lows = recent_window[recent_window['low'] == recent_window['low'].rolling(3, center=True).min()]['low']
     swing_highs = recent_window[recent_window['high'] == recent_window['high'].rolling(3, center=True).max()]['high']
 
-    # واگرایی مثبت (Bullish Divergence - LONG) با فیلتر روند کلان صعودی/خنثی و چند برخورد
+    # واگرایی مثبت (Bullish Divergence - LONG)
     if macro_trend != "DOWN" and len(swing_lows) >= 2:
         if last["low"] <= recent_window['low'].min() and rsi > recent_window.loc[recent_window['low'].idxmin(), 'rsi'] and rsi < 42:
             entry = last["close"]
@@ -241,7 +229,7 @@ def check_rsi_divergence(df, market_code):
                         f"▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n"
                         f"🎯 حد سود ۱: {tp1:,.4f}\n🎯 حد سود ۲: {tp2:,.4f}\n▫️ RSI: {rsi:.1f}")
 
-    # واگرایی منفی (Bearish Divergence - SHORT) با فیلتر روند کلان نزولی/خنثی و چند برخورد
+    # واگرایی منفی (Bearish Divergence - SHORT)
     if macro_trend != "UP" and len(swing_highs) >= 2:
         if last["high"] >= recent_window['high'].max() and rsi < recent_window.loc[recent_window['high'].idxmax(), 'rsi'] and rsi > 58:
             entry = last["close"]
@@ -523,7 +511,6 @@ def extract_signal_details(msg):
     return ("SHORT" if "SHORT" in msg else "LONG"), num(r"ورود: ([\d,\.]+)"), num(r"حد ضرر: ([\d,\.]+)"), num(r"حد سود ۱: ([\d,\.]+|)")
 
 def register_and_send(strategy_name, msg, symbol):
-    # جلوگیری از ارسال سیگنال تکراری برای یک نماد و استراتژی مشابه در بازه کوتاه
     signal_key = f"{symbol}_{strategy_name}"
     if signal_key in signal_history_cache and time.time() - signal_history_cache[signal_key] < 900:
         return
@@ -615,4 +602,3 @@ if __name__ == "__main__":
     threading.Thread(target=run_signal_tracker, daemon=True).start()
     threading.Thread(target=telegram_stats_command_handler, daemon=True).start()
     run_scanner()
-```
