@@ -269,7 +269,7 @@ def check_trend_strategy(df, market_code, is_margin=True):
         return f"🟢 <b>سیگنال لانگ بولینگر</b>\n▫️ ارز: <code>{market_code}</code>\n📌 موقعیت: LONG (تعهدی / فیوچرز)\n▫️ ورود: {c:,.4f}\n▫️ RSI: {rsi:.1f}"
 
     previous = df.iloc[-3]
-    if c >= upper and c < ema and rsi > 65 and _has_confirmed_selling_pressure(last, previous):
+    if c >= upper and c < ema and rsi > 50 and _has_confirmed_selling_pressure(last, previous):
         entry = c
         sl = upper + atr
         risk = sl - entry
