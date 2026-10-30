@@ -20,7 +20,7 @@ OHLC_URL = f"{BASE_API}/v1/mkt/candles/"  # اندپوینت رسمی بیت‌�
 
 BB_PERIOD = 20
 BB_STD = 2.0
-BOLLINGER_SQUEEZE_THRESHOLD = float(os.getenv("BOLLINGER_SQUEEZE_THRESHOLD", "2.0"))  # درصد؛ کمتر از این مقدار سیگنال مسدود می‌شود
+BOLLINGER_SQUEEZE_THRESHOLD = float(os.getenv("BOLLINGER_SQUEEZE_THRESHOLD", "2.0"))
 TRACKER_FILE = os.getenv("SIGNAL_TRACKER_FILE", "signal_tracker.json")
 
 CHECK_INTERVAL = 60   # هر ۱ دقیقه چک می‌کند
@@ -30,7 +30,7 @@ TIMEFRAME = "15"      # تایم‌فریم ۱۵ دقیقه
 tracker_lock = threading.RLock()
 signal_tracker = {}
 
-# Break & Retest (SHORT only): isolated state/settings; existing strategy settings stay unchanged.
+# Break & Retest (SHORT only): isolated state/settings
 BR_MAX_RETEST_CANDLES = 8
 BR_RETEST_TOLERANCE_PCT = 0.15 / 100.0
 BR_BREAKOUT_VOL_MULT = 1.5
@@ -39,7 +39,7 @@ BR_MIN_REJECTION_BODY_RATIO = 0.30
 BR_PENDING_SHORT = {}
 BR_LAST_PROCESSED = {}
 
-# ----------------- ۱۱۰ نماد مارجین / فیوچرز (پایه USDT) -----------------
+# ----------------- نمادهای مارجین / فیوچرز (پایه USDT) -----------------
 MARGIN_SYMBOLS = [
     'PAXG_USDT', 'SOL_USDT', 'SUI_USDT', 'GALA_USDT', 'GRAM_USDT',
     'HYPE_USDT', 'SLVON_USDT', 'ETH_USDT', 'POGE_USDT', 'ADA_USDT',
@@ -193,6 +193,21 @@ def _has_confirmed_selling_pressure(candle, previous_candle):
         and volume > previous_volume
     )
 
+# ================= تأیید میانی بولینگر BTC برای LONG =================
+def btc_long_middle_band_confirmed():
+    """Requires the last closed BTC candle to close strictly above its BB middle on both 15m and 1h."""
+    for resolution in ("15", "60"):
+        btc_df = fetch_bitpin_candles("BTC_USDT", resolution=resolution, count=100)
+        btc_df = calculate_indicators(btc_df)
+        if btc_df is None or len(btc_df) < 2:
+            return False
+        closed = btc_df.iloc[-2]
+        close = closed.get("close")
+        middle = closed.get("bb_middle")
+        if pd.isna(close) or pd.isna(middle) or not (float(close) > float(middle)):
+            return False
+    return True
+
 # ================= استراتژی‌ها (سنسی، روند، پولبک) =================
 def check_sensi_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
@@ -265,7 +280,6 @@ def check_trend_strategy(df, market_code, is_margin=True):
     return None
 
 def check_pullback_strategy(df, market_code, is_margin=True):
-    """Identify a bullish pullback in an established uptrend using the closed candle."""
     if df is None or len(df) < 55:
         return None
 
@@ -287,12 +301,10 @@ def check_pullback_strategy(df, market_code, is_margin=True):
     if pd.isna(atr) or atr <= 0:
         atr = close * 0.01
 
-    # Trend context: price above EMA200 and EMA200 rising versus five candles ago.
     ema_5_ago = df.iloc[-7]["ema200"]
     if pd.isna(ema_5_ago) or close <= ema or ema <= ema_5_ago:
         return None
 
-    # Pullback reaches the BB middle / EMA20 area, then closes back above it.
     touch_zone = low <= bb_middle * 1.01 and low >= bb_middle * 0.97
     bullish_reclaim = close > open_price and close > bb_middle and previous["close"] <= previous["bb_middle"] * 1.01
     if not (touch_zone and bullish_reclaim and 35 <= rsi <= 60):
@@ -319,7 +331,6 @@ def check_pullback_strategy(df, market_code, is_margin=True):
 
 # ================= Break & Retest (SHORT only) =================
 def check_short_break_retest(df, market_code):
-    """Track a strong lower-Bollinger breakout, then alert on bearish retest rejection."""
     if df is None or len(df) < 55:
         return None
 
@@ -393,7 +404,7 @@ def check_short_break_retest(df, market_code):
             }
     return None
 
-# ================= Signal Tracker (ذخیره و پیگیری سیگنال‌ها) =================
+# ================= Signal Tracker =================
 def load_tracker():
     global signal_tracker
     try:
@@ -445,7 +456,7 @@ def tracker_stats():
     win_rate = (wins / decided * 100) if decided > 0 else 0.0
     return total, wins, losses, open_signals, win_rate, ambiguous
 
-# ================= بولینگر اسکوییز (فیلتر فشردگی باند) =================
+# ================= بولینگر اسکوییز =================
 def is_squeeze(df):
     try:
         bw = df.iloc[-2]["bandwidth"]
@@ -455,12 +466,12 @@ def is_squeeze(df):
     except Exception:
         return False
 
-# ================= حلقه پس‌زمینه رهگیری سیگنال‌ها =================
+# ================= رهگیری سیگنال‌ها =================
 def check_hit(symbol, direction, tp1, sl, candle_high, candle_low):
     if direction == "LONG":
         hit_tp = candle_high >= tp1
         hit_sl = candle_low <= sl
-    else:  # SHORT
+    else:
         hit_tp = candle_low <= tp1
         hit_sl = candle_high >= sl
     return hit_tp, hit_sl
@@ -542,7 +553,7 @@ def telegram_stats_command_handler():
             print(f"[Stats Polling Error] {e}")
             time.sleep(3)
 
-# ================= ثبت و ارسال سیگنال =================
+# ================= ثبت و ارسال سیگنال با فیلتر بیت‌کوین برای لانگ =================
 def extract_signal_details(msg):
     def num(pat):
         m = re.search(pat, msg)
@@ -553,10 +564,13 @@ def extract_signal_details(msg):
     direction = "SHORT" if "موقعیت: SHORT" in msg else "LONG"
     return direction, entry, sl, tp1
 
-def register_and_send(strategy_name, msg, symbol, is_margin=True):
+def register_and_send(strategy_name, msg, symbol, is_margin=True, long_confirmed=False):
+    direction, entry, sl, tp1 = extract_signal_details(msg)
+    if direction == "LONG" and not long_confirmed:
+        print(f"[BTC filter] Blocked LONG signal for {symbol}: BTC 15m/1h middle-band confirmation failed.")
+        return
     if not send_telegram(msg):
         return
-    direction, entry, sl, tp1 = extract_signal_details(msg)
     if entry is None:
         return
     add_signal(symbol, direction, entry, sl if sl is not None else 0.0, tp1 if tp1 is not None else 0.0, strategy_name, is_margin)
@@ -593,6 +607,9 @@ def run_scanner():
             if scan_phase and last_scanned_candle_time[scan_phase] != current_candle_id:
                 print(f"[{now.strftime('%H:%M:%S')}] Starting {scan_phase} market scan...")
 
+                # بررسی وضعیت بیت‌کوین برای فیلتر لانگ
+                long_confirmed = btc_long_middle_band_confirmed()
+
                 for symbol in MARGIN_SYMBOLS:
                     df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=300)
                     if df is not None and not df.empty:
@@ -601,7 +618,7 @@ def run_scanner():
                             if scan_phase == "close":
                                 break_retest_res = check_short_break_retest(df, symbol)
                                 if break_retest_res:
-                                    register_and_send("break_retest_short", break_retest_res, symbol, is_margin=True)
+                                    register_and_send("break_retest_short", break_retest_res, symbol, is_margin=True, long_confirmed=long_confirmed)
 
                             if is_squeeze(df):
                                 time.sleep(0.3)
@@ -610,15 +627,15 @@ def run_scanner():
                             if scan_phase == "close":
                                 sensi_res = check_sensi_strategy(df, symbol, is_margin=True)
                                 if sensi_res:
-                                    register_and_send("sensi", sensi_res, symbol, is_margin=True)
+                                    register_and_send("sensi", sensi_res, symbol, is_margin=True, long_confirmed=long_confirmed)
                             else:
                                 trend_res = check_trend_strategy(df, symbol, is_margin=True)
                                 if trend_res:
-                                    register_and_send("trend", trend_res, symbol, is_margin=True)
+                                    register_and_send("trend", trend_res, symbol, is_margin=True, long_confirmed=long_confirmed)
 
                                 pullback_res = check_pullback_strategy(df, symbol, is_margin=True)
                                 if pullback_res:
-                                    register_and_send("pullback", pullback_res, symbol, is_margin=True)
+                                    register_and_send("pullback", pullback_res, symbol, is_margin=True, long_confirmed=long_confirmed)
 
                     time.sleep(0.3)
 
