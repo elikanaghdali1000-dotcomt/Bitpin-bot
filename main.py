@@ -179,26 +179,20 @@ def calculate_indicators(df):
 
 # ================= شناسایی نواحی کلیدی (حمایت و مقاومت هوشمند با حجم و واکنش) =================
 def find_key_support_resistance(df):
-    """
-    شناسایی قله‌ها و دره‌های ماژور که حجم معاملات در آن‌ها بالا بوده است (تاییدیه نهنگ‌ها/واکنش تاریخی).
-    """
     if len(df) < 30:
         return None, None
     
     recent = df.iloc[-30:-2]
     vol_ma = recent["volume"].mean()
     
-    # پیدا کردن سطوح با بیشترین واکنش و حجم بالا
     supports = []
     resistances = []
     
     for i in range(2, len(recent) - 2):
         row = recent.iloc[i]
-        # دره (حمایت احتمالی)
         if row["low"] <= recent.iloc[i-1]["low"] and row["low"] <= recent.iloc[i+1]["low"]:
             if row["volume"] >= 0.9 * vol_ma:
                 supports.append(row["low"])
-        # قله (مقاومت احتمالی)
         if row["high"] >= recent.iloc[i-1]["high"] and row["high"] >= recent.iloc[i+1]["high"]:
             if row["volume"] >= 0.9 * vol_ma:
                 resistances.append(row["high"])
@@ -210,9 +204,6 @@ def find_key_support_resistance(df):
 
 # ================= استراتژی واگرایی RSI در نواحی کلیدی =================
 def check_rsi_divergence_strategy(df, market_code):
-    """
-    بررسی واگرایی RSI در سقف‌ها و کف‌های ماژور (نواحی مقاومت/حمایت کلیدی)
-    """
     if len(df) < 50:
         return None
         
@@ -265,7 +256,6 @@ def check_rsi_divergence_strategy(df, market_code):
 
     return None
 
-# تایید فشار فروش: کندل قرمز قوی، بسته‌شدن در بخش پایینی دامنه و حجم بالاتر از میانگین
 def _has_confirmed_selling_pressure(candle, previous_candle):
     candle_range = candle["high"] - candle["low"]
     vol_ma20 = candle.get("vol_ma20", float("nan"))
@@ -543,17 +533,6 @@ def tracker_stats():
     win_rate = (wins / decided * 100) if decided > 0 else 0.0
     return total, wins, losses, open_signals, win_rate, ambiguous
 
-# ================= بولینگر اسکوییز =================
-def is_squeeze(df):
-    try:
-        bw = df.iloc[-2]["bandwidth"]
-        if pd.isna(bw):
-            return False
-        return bw < BOLLINGER_SQUEEZE_THRESHOLD
-    except Exception:
-        return False
-
-# ================= رهگیری سیگنال‌ها =================
 def check_hit(symbol, direction, tp1, sl, candle_high, candle_low):
     if direction == "LONG":
         hit_tp = candle_high >= tp1
@@ -708,3 +687,20 @@ def run_scanner():
 
                                 # ۲. استراتژی واگرایی RSI در نواحی کلیدی
                                 rsi_div_res = check_rsi_divergence_strategy(df, symbol)
+                                if rsi_div_res:
+                                    register_and_send("rsi_divergence", rsi_div_res, symbol, is_margin=True, long_confirmed=long_confirmed)
+
+                                # ۳. استراتژی سنسی (کف و سقف)
+                                sensi_res = check_sensi_strategy(df, symbol, is_margin=True)
+                                if sensi_res:
+                                    register_and_send("sensi", sensi_res, symbol, is_margin=True, long_confirmed=long_confirmed)
+
+                                # ۴. استراتژی روند بولینگر
+                                trend_res = check_trend_strategy(df, symbol, is_margin=True)
+                                if trend_res:
+                                    register_and_send("trend_bollinger", trend_res, symbol, is_margin=True, long_confirmed=long_confirmed)
+
+                                # ۵. استراتژی پولبک
+                                pullback_res = check_pullback_strategy(df, symbol, is_margin=True)
+                                if pullback_res:
+                                    register_and_send("pullback", pullback_res, symbol, is_margin=True, long_confirmed=
