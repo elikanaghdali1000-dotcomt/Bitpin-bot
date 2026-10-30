@@ -177,6 +177,94 @@ def calculate_indicators(df):
 
     return df
 
+# ================= شناسایی نواحی کلیدی (حمایت و مقاومت هوشمند با حجم و واکنش) =================
+def find_key_support_resistance(df):
+    """
+    شناسایی قله‌ها و دره‌های ماژور که حجم معاملات در آن‌ها بالا بوده است (تاییدیه نهنگ‌ها/واکنش تاریخی).
+    """
+    if len(df) < 30:
+        return None, None
+    
+    recent = df.iloc[-30:-2]
+    vol_ma = recent["volume"].mean()
+    
+    # پیدا کردن سطوح با بیشترین واکنش و حجم بالا
+    supports = []
+    resistances = []
+    
+    for i in range(2, len(recent) - 2):
+        row = recent.iloc[i]
+        # دره (حمایت احتمالی)
+        if row["low"] <= recent.iloc[i-1]["low"] and row["low"] <= recent.iloc[i+1]["low"]:
+            if row["volume"] >= 0.9 * vol_ma:
+                supports.append(row["low"])
+        # قله (مقاومت احتمالی)
+        if row["high"] >= recent.iloc[i-1]["high"] and row["high"] >= recent.iloc[i+1]["high"]:
+            if row["volume"] >= 0.9 * vol_ma:
+                resistances.append(row["high"])
+                
+    key_support = min(supports) if supports else recent["low"].min()
+    key_resistance = max(resistances) if resistances else recent["high"].max()
+    
+    return key_support, key_resistance
+
+# ================= استراتژی واگرایی RSI در نواحی کلیدی =================
+def check_rsi_divergence_strategy(df, market_code):
+    """
+    بررسی واگرایی RSI در سقف‌ها و کف‌های ماژور (نواحی مقاومت/حمایت کلیدی)
+    """
+    if len(df) < 50:
+        return None
+        
+    last = df.iloc[-2]
+    prev = df.iloc[-3]
+    
+    support, resistance = find_key_support_resistance(df)
+    if support is None or resistance is None:
+        return None
+        
+    atr = last.get("atr", last["close"] * 0.01)
+    if pd.isna(atr) or atr <= 0:
+        atr = last["close"] * 0.01
+
+    # واگرایی منفی (Bearish Divergence) در مقاومت برای شورت
+    near_resistance = last["high"] >= resistance * 0.995 and last["high"] <= resistance * 1.005
+    if near_resistance and last["rsi"] < prev["rsi"] and last["close"] < last["open"]:
+        entry = last["close"]
+        sl = resistance + (0.5 * atr)
+        risk = sl - entry
+        if risk > 0:
+            tp1 = entry - (1.5 * risk)
+            tp2 = entry - (2.5 * risk)
+            return (f"📉 <b>سیگنال شورت واگرایی RSI (مقاومت کلیدی)</b>\n"
+                    f"▫️ ارز: <code>{market_code}</code> (تعهدی / فیوچرز)\n"
+                    f"📌 موقعیت: SHORT\n"
+                    f"▫️ ورود: {entry:,.4f}\n"
+                    f"🛡 حد ضرر: {sl:,.4f}\n"
+                    f"🎯 حد سود ۱: {tp1:,.4f}\n"
+                    f"🎯 حد سود ۲: {tp2:,.4f}\n"
+                    f"▫️ RSI: {last['rsi']:.1f}")
+
+    # واگرایی مثبت (Bullish Divergence) در حمایت برای لانگ
+    near_support = last["low"] <= support * 1.005 and last["low"] >= support * 0.995
+    if near_support and last["rsi"] > prev["rsi"] and last["close"] > last["open"]:
+        entry = last["close"]
+        sl = support - (0.5 * atr)
+        risk = entry - sl
+        if risk > 0:
+            tp1 = entry + (1.5 * risk)
+            tp2 = entry + (2.5 * risk)
+            return (f"📈 <b>سیگنال لانگ واگرایی RSI (حمایت کلیدی)</b>\n"
+                    f"▫️ ارز: <code>{market_code}</code> (تعهدی / فیوچرز)\n"
+                    f"📌 موقعیت: LONG\n"
+                    f"▫️ ورود: {entry:,.4f}\n"
+                    f"🛡 حد ضرر: {sl:,.4f}\n"
+                    f"🎯 حد سود ۱: {tp1:,.4f}\n"
+                    f"🎯 حد سود ۲: {tp2:,.4f}\n"
+                    f"▫️ RSI: {last['rsi']:.1f}")
+
+    return None
+
 # تایید فشار فروش: کندل قرمز قوی، بسته‌شدن در بخش پایینی دامنه و حجم بالاتر از میانگین
 def _has_confirmed_selling_pressure(candle, previous_candle):
     candle_range = candle["high"] - candle["low"]
@@ -195,7 +283,6 @@ def _has_confirmed_selling_pressure(candle, previous_candle):
 
 # ================= تأیید میانی بولینگر BTC برای LONG =================
 def btc_long_middle_band_confirmed():
-    """Requires the last closed BTC candle to close strictly above its BB middle on both 15m and 1h."""
     for resolution in ("15", "60"):
         btc_df = fetch_bitpin_candles("BTC_USDT", resolution=resolution, count=100)
         btc_df = calculate_indicators(btc_df)
@@ -213,9 +300,7 @@ def check_sensi_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
         return None
     sig_candle = df.iloc[-2]
-    lookback_window = df.iloc[-27:-2]
-    prior_support = lookback_window["low"].min()
-    prior_resistance = lookback_window["high"].max()
+    prior_support, prior_resistance = find_key_support_resistance(df)
 
     current_vol = sig_candle["volume"]
     vol_ma20 = sig_candle["vol_ma20"]
@@ -238,8 +323,7 @@ def check_sensi_strategy(df, market_code, is_margin=True):
         if risk > 0:
             tp1 = entry + (1.5 * risk)
             tp2 = entry + (2.5 * risk)
-            market_type_str = "تعهدی / فیوچرز"
-            return f"🎯 <b>سیگنال لانگ سنسی (خشکی حجم در کف)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n📌 موقعیت: LONG\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}"
+            return f"🎯 <b>سیگنال لانگ سنسی (خشکی حجم در کف)</b>\n▫️ ارز: <code>{market_code}</code> (تعهدی)\n📌 موقعیت: LONG\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}\n🎯 حد سود ۲: {tp2:,.4f}"
 
     near_resistance = (sig_candle["high"] <= prior_resistance * 1.003) and (sig_candle["high"] >= prior_resistance * 0.992)
     previous_candle = df.iloc[-3]
@@ -254,8 +338,8 @@ def check_sensi_strategy(df, market_code, is_margin=True):
         risk = sl - entry
         if risk > 0:
             tp1 = entry - (1.5 * risk)
-            market_type_str = "تعهدی / فیوچرز"
-            return f"🎯 <b>سیگنال شورت سنسی (خشکی حجم در سقف)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n📌 موقعیت: SHORT\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}"
+            tp2 = entry - (2.5 * risk)
+            return f"🎯 <b>سیگنال شورت سنسی (خشکی حجم در سقف)</b>\n▫️ ارز: <code>{market_code}</code> (تعهدی)\n📌 موقعیت: SHORT\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}\n🎯 حد سود ۲: {tp2:,.4f}"
     return None
 
 def check_trend_strategy(df, market_code, is_margin=True):
@@ -266,7 +350,12 @@ def check_trend_strategy(df, market_code, is_margin=True):
     if pd.isna(atr): atr = c * 0.01
 
     if c <= lower and c > ema and rsi < 35:
-        return f"🟢 <b>سیگنال لانگ بولینگر</b>\n▫️ ارز: <code>{market_code}</code>\n📌 موقعیت: LONG (تعهدی / فیوچرز)\n▫️ ورود: {c:,.4f}\n▫️ RSI: {rsi:.1f}"
+        entry = c
+        sl = lower - (0.5 * atr)
+        risk = entry - sl
+        if risk > 0:
+            tp1 = entry + (1.5 * risk)
+            return f"🟢 <b>سیگنال لانگ بولینگر</b>\n▫️ ارز: <code>{market_code}</code>\n📌 موقعیت: LONG\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}\n▫️ RSI: {rsi:.1f}"
 
     previous = df.iloc[-3]
     if c >= upper and c < ema and rsi > 50 and _has_confirmed_selling_pressure(last, previous):
@@ -275,8 +364,7 @@ def check_trend_strategy(df, market_code, is_margin=True):
         risk = sl - entry
         if risk > 0:
             tp1 = entry - (1.5 * risk)
-            market_type_str = "تعهدی / فیوچرز"
-            return f"🔴 <b>سیگنال شورت بولینگر (روند)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n📌 موقعیت: SHORT\n▫️ ورود: {entry:,.4f}\n▫️ RSI: {rsi:.1f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}"
+            return f"🔴 <b>سیگنال شورت بولینگر (روند)</b>\n▫️ ارز: <code>{market_code}</code>\n📌 موقعیت: SHORT\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}\n▫️ RSI: {rsi:.1f}"
     return None
 
 def check_pullback_strategy(df, market_code, is_margin=True):
@@ -319,9 +407,8 @@ def check_pullback_strategy(df, market_code, is_margin=True):
         return None
     tp1 = entry + 1.5 * risk
     tp2 = entry + 2.5 * risk
-    market_type_str = "تعهدی / فیوچرز"
     return (f"↗️ <b>سیگنال لانگ پولبک (روند صعودی)</b>\n"
-            f"▫️ ارز: <code>{market_code}</code> ({market_type_str})\n"
+            f"▫️ ارز: <code>{market_code}</code> (تعهدی)\n"
             f"📌 موقعیت: LONG\n"
             f"▫️ ورود: {entry:,.4f}\n"
             f"🛡 حد ضرر: {sl:,.4f}\n"
@@ -384,10 +471,10 @@ def check_short_break_retest(df, market_code):
                 tp1 = entry - risk
                 tp2 = entry - 2.0 * risk
                 return (f"🔻 <b>سیگنال شورت Break & Retest (شکست و پولبک)</b>\n"
-                        f"▫️ ارز: <code>{market_code}</code> (تعهدی / فیوچرز)\n"
+                        f"▫️ ارز: <code>{market_code}</code> (تعهدی)\n"
                         f"📌 موقعیت: SHORT\n▫️ ورود: {entry:,.4f}\n"
                         f"🛡 حد ضرر: {stop:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}\n"
-                        f"🎯 حد سود ۲: {tp2:,.4f}\n▫️ سطح شکست بولینگر: {level:,.4f}")
+                        f"🎯 حد سود ۲: {tp2:,.4f}\n▫️ سطح شکست: {level:,.4f}")
 
     if pending is None:
         lower = candle.get("bb_lower", float("nan"))
@@ -553,7 +640,7 @@ def telegram_stats_command_handler():
             print(f"[Stats Polling Error] {e}")
             time.sleep(3)
 
-# ================= ثبت و ارسال سیگنال با فیلتر بیت‌کوین برای لانگ =================
+# ================= ثبت و ارسال سیگنال =================
 def extract_signal_details(msg):
     def num(pat):
         m = re.search(pat, msg)
@@ -580,10 +667,9 @@ def run_scanner():
     print("Market scanner started successfully.")
 
     test_msg = (
-        "🚀 <b>ربات اسکنر بیت‌پین (حالت دیباگ) روشن شد!</b>\n\n"
-        "✅ اتصال به تلگرام برقرار است.\n"
-        " USDT 🔗 ارزهای پایه: \n"
-        "⏱ به محض رسیدن دقیقه ۰۱، اولین تست دریافت کندل انجام خواهد شد."
+        "🚀 <b>ربات اسکنر بیت‌پین (آپدیت شد) روشن شد!</b>\n\n"
+        "✅ نواحی کلیدی (حمایت/مقاومت) + واگرایی RSI فعال شد.\n"
+        "⏱ پایش کامل بازار مارجین/تعهدی..."
     )
     send_telegram(test_msg)
 
@@ -607,7 +693,6 @@ def run_scanner():
             if scan_phase and last_scanned_candle_time[scan_phase] != current_candle_id:
                 print(f"[{now.strftime('%H:%M:%S')}] Starting {scan_phase} market scan...")
 
-                # بررسی وضعیت بیت‌کوین برای فیلتر لانگ
                 long_confirmed = btc_long_middle_band_confirmed()
 
                 for symbol in MARGIN_SYMBOLS:
@@ -616,52 +701,10 @@ def run_scanner():
                         df = calculate_indicators(df)
                         if df is not None:
                             if scan_phase == "close":
+                                # ۱. استراتژی Break & Retest
                                 break_retest_res = check_short_break_retest(df, symbol)
                                 if break_retest_res:
                                     register_and_send("break_retest_short", break_retest_res, symbol, is_margin=True, long_confirmed=long_confirmed)
 
-                            if is_squeeze(df):
-                                time.sleep(0.3)
-                                continue
-
-                            if scan_phase == "close":
-                                sensi_res = check_sensi_strategy(df, symbol, is_margin=True)
-                                if sensi_res:
-                                    register_and_send("sensi", sensi_res, symbol, is_margin=True, long_confirmed=long_confirmed)
-                            else:
-                                trend_res = check_trend_strategy(df, symbol, is_margin=True)
-                                if trend_res:
-                                    register_and_send("trend", trend_res, symbol, is_margin=True, long_confirmed=long_confirmed)
-
-                                pullback_res = check_pullback_strategy(df, symbol, is_margin=True)
-                                if pullback_res:
-                                    register_and_send("pullback", pullback_res, symbol, is_margin=True, long_confirmed=long_confirmed)
-
-                    time.sleep(0.3)
-
-                last_scanned_candle_time[scan_phase] = current_candle_id
-                print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {scan_phase.capitalize()} scan finished.")
-
-            time.sleep(0.25)
-
-        except Exception as e:
-            print(f"Loop error: {e}")
-            time.sleep(10)
-
-# ================= نقطه اجرای برنامه =================
-if __name__ == "__main__":
-    load_tracker()
-
-    server_thread = threading.Thread(target=run_http_server, daemon=True)
-    server_thread.start()
-
-    ping_thread = threading.Thread(target=self_ping, daemon=True)
-    ping_thread.start()
-
-    tracker_thread = threading.Thread(target=run_signal_tracker, daemon=True)
-    tracker_thread.start()
-
-    stats_thread = threading.Thread(target=telegram_stats_command_handler, daemon=True)
-    stats_thread.start()
-
-    run_scanner()
+                                # ۲. استراتژی واگرایی RSI در نواحی کلیدی
+                                rsi_div_res = check_rsi_divergence_strategy(df, symbol)
