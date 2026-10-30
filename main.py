@@ -703,4 +703,17 @@ def run_scanner():
                                 # ۵. استراتژی پولبک
                                 pullback_res = check_pullback_strategy(df, symbol, is_margin=True)
                                 if pullback_res:
-                                    register_and_send("pullback", pullback_res, symbol, is_margin=True, long_confirmed=
+                                    register_and_send("pullback", pullback_res, symbol, is_margin=True, long_confirmed=long_confirmed)
+
+                last_scanned_candle_time[scan_phase] = current_candle_id
+
+        except Exception as e:
+            print(f"[Scanner Error] {e}")
+        time.sleep(1)
+
+if __name__ == "__main__":
+    load_tracker()
+
+    # اجرای سرور HTTP برای رندر
+    threading.Thread(target=run_http_server, daemon=True).start()
+    threading.Thread(target=self
