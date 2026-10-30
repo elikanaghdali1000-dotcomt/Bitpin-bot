@@ -804,4 +804,6 @@ def main_scanner_loop():
                 notify_first_successful_scan(scanned_count)
 
             time.sleep(CHECK_INTERVAL)
-        except Exception as e
+        except Exception as exc:
+            print(f"Main loop error: {exc}")
+            time.sleep(15)
