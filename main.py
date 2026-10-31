@@ -3,6 +3,7 @@ import os
 import time
 import json
 import re
+import math
 import uuid
 import requests
 import pandas as pd
@@ -28,7 +29,7 @@ TIMEFRAME = "15"      # تایم‌فریم ۱۵ دقیقه
 
 # فیلتر حجم استراتژی پولبک: کندل سیگنال باید حجمی >= این ضریب × vol_ma20 داشته باشد.
 # استراتژی سنسی از این قانون مستثناست (منطق «خشکی حجم» آن دست‌نخورده می‌ماند).
-PULLBACK_MIN_VOLUME_MULT = float(os.getenv("PULLBACK_MIN_VOLUME_MULT", ".85"))
+PULLBACK_MIN_VOLUME_MULT = float(os.getenv("PULLBACK_MIN_VOLUME_MULT", "1.1"))
 
 # وضعیت سیگنال‌ها در حافظه و فایل JSON
 tracker_lock = threading.RLock()
@@ -197,147 +198,136 @@ def _has_confirmed_selling_pressure(candle, previous_candle):
         and volume > previous_volume
     )
 
+def format_price(value):
+    """Render a plain, copyable price with useful precision and no separators."""
+    value = float(value)
+    if not math.isfinite(value):
+        raise ValueError("Signal price must be finite")
+    if value == 0:
+        return "0.00"
+    decimals = max(2, min(10, 7 - int(math.floor(math.log10(abs(value))))))
+    return f"{value:.{decimals}f}".rstrip("0").rstrip(".")
+
+def bollinger_stop(candle, direction):
+    """Place stop just beyond the nearest directional Bollinger band."""
+    atr = candle.get("atr", float("nan"))
+    if pd.isna(atr) or float(atr) <= 0:
+        atr = float(candle["close"]) * 0.005
+    band_key = "bb_lower" if direction == "LONG" else "bb_upper"
+    band = candle.get(band_key, float("nan"))
+    if pd.isna(band) or float(band) <= 0:
+        return None
+    buffer = 0.10 * float(atr)
+    return float(band) - buffer if direction == "LONG" else float(band) + buffer
+
+def build_signal(strategy, market_code, direction, entry, order_type, stop, tp1, tp2=None, extra=None):
+    side_emoji = "🟢" if direction == "LONG" else "🔴"
+    lines = [f"{side_emoji} <b>{direction} SIGNAL | {strategy}</b>",
+             f"Symbol: <code>{market_code}</code>", f"Strategy: {strategy}",
+             f"Side: {direction}", f"Entry Type: {order_type}",
+             "Entry Price:", f"<code>{format_price(entry)}</code>",
+             "Stop Loss:", f"<code>{format_price(stop)}</code>",
+             "Take Profit 1:", f"<code>{format_price(tp1)}</code>"]
+    if tp2 is not None:
+        lines.extend(["Take Profit 2:", f"<code>{format_price(tp2)}</code>"])
+    if extra:
+        lines.append(extra)
+    return "\n".join(lines)
+
 # ================= استراتژی‌ها (سنسی، روند، پولبک) =================
 def check_sensi_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
         return None
-    sig_candle = df.iloc[-2]
-    lookback_window = df.iloc[-27:-2]
-    prior_support = lookback_window["low"].min()
-    prior_resistance = lookback_window["high"].max()
-
-    current_vol = sig_candle["volume"]
-    vol_ma20 = sig_candle["vol_ma20"]
+    candle = df.iloc[-2]
+    window = df.iloc[-27:-2]
+    support, resistance = window["low"].min(), window["high"].max()
+    vol_ma20 = candle["vol_ma20"]
     if pd.isna(vol_ma20) or vol_ma20 == 0:
         return None
+    dried = candle["volume"] / vol_ma20 < 0.70
+    near_support = support * 0.992 <= candle["low"] <= support * 1.003
+    bullish = (candle["close"] > candle["open"] or
+               candle["close"] > candle["low"] + 0.6 * (candle["high"] - candle["low"]))
+    if near_support and dried and bullish:
+        entry = float(candle["close"])
+        stop = bollinger_stop(candle, "LONG")
+        if stop is not None and stop < entry:
+            risk = entry - stop
+            return build_signal("Sensi Volume-Dry Reversal", market_code, "LONG", entry,
+                                "LIMIT", stop, entry + 1.5*risk, entry + 2.5*risk)
 
-    vol_ratio = current_vol / vol_ma20
-    # سنسی عمداً از فیلتر حجم بالای پولبک مستثناست: منطق آن خشکی حجم است.
-    is_volume_dried = vol_ratio < 0.70
-    atr = sig_candle.get("atr", (sig_candle["high"] - sig_candle["low"]))
-    if pd.isna(atr) or atr == 0:
-        atr = sig_candle["close"] * 0.005
-
-    near_support = (sig_candle["low"] <= prior_support * 1.003) and (sig_candle["low"] >= prior_support * 0.992)
-    is_bullish_reversal = (sig_candle["close"] > sig_candle["open"]) or (sig_candle["close"] > sig_candle["low"] + 0.6 * (sig_candle["high"] - sig_candle["low"]))
-
-    if near_support and is_volume_dried and is_bullish_reversal:
-        entry = sig_candle["close"]
-        sl = min(prior_support, sig_candle["low"]) - (0.2 * atr)
-        risk = entry - sl
-        if risk > 0:
-            tp1 = entry + (1.5 * risk)
-            tp2 = entry + (2.5 * risk)
-            market_type_str = "تعهدی / فیوچرز"
-            return f"🎯 <b>سیگنال لانگ سنسی (خشکی حجم در کف)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n📌 موقعیت: LONG\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}"
-
-    near_resistance = (sig_candle["high"] <= prior_resistance * 1.003) and (sig_candle["high"] >= prior_resistance * 0.992)
-    previous_candle = df.iloc[-3]
-    has_confirmed_selling_pressure = _has_confirmed_selling_pressure(sig_candle, previous_candle)
-    current_candle_is_bearish = sig_candle["close"] < sig_candle["open"]
-    live_candle = df.iloc[-1]
-    live_candle_is_bearish = live_candle["close"] < live_candle["open"]
-
-    if near_resistance and has_confirmed_selling_pressure and current_candle_is_bearish and live_candle_is_bearish:
-        entry = sig_candle["close"]
-        sl = max(prior_resistance, sig_candle["high"]) + (0.2 * atr)
-        risk = sl - entry
-        if risk > 0:
-            tp1 = entry - (1.5 * risk)
-            market_type_str = "تعهدی / فیوچرز"
-            return f"🎯 <b>سیگنال شورت سنسی (خشکی حجم در سقف)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n📌 موقعیت: SHORT\n▫️ ورود: {entry:,.4f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}"
+    near_resistance = resistance * 0.992 <= candle["high"] <= resistance * 1.003
+    previous = df.iloc[-3]
+    confirmed = _has_confirmed_selling_pressure(candle, previous)
+    live_bearish = df.iloc[-1]["close"] < df.iloc[-1]["open"]
+    if near_resistance and confirmed and candle["close"] < candle["open"] and live_bearish:
+        entry = float(candle["close"])
+        stop = bollinger_stop(candle, "SHORT")
+        if stop is not None and stop > entry:
+            risk = stop - entry
+            return build_signal("Sensi Volume-Dry Reversal", market_code, "SHORT", entry,
+                                "LIMIT", stop, entry - 1.5*risk)
     return None
 
 def check_trend_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
         return None
-    last = df.iloc[-2]
-    c, lower, upper, ema, rsi, atr = last["close"], last["bb_lower"], last["bb_upper"], last["ema200"], last["rsi"], last["atr"]
-    if pd.isna(atr): atr = c * 0.01
-
-    if c <= lower and c > ema and rsi < 35:
-        return f"🟢 <b>سیگنال لانگ بولینگر</b>\n▫️ ارز: <code>{market_code}</code>\n📌 موقعیت: LONG (تعهدی / فیوچرز)\n▫️ ورود: {c:,.4f}\n▫️ RSI: {rsi:.1f}"
-
+    candle = df.iloc[-2]
+    close, lower, upper = candle["close"], candle["bb_lower"], candle["bb_upper"]
+    ema, rsi = candle["ema200"], candle["rsi"]
+    if any(pd.isna(v) for v in (close, lower, upper, ema, rsi)):
+        return None
+    if close <= lower and close > ema and rsi < 35:
+        entry = float(close)
+        stop = bollinger_stop(candle, "LONG")
+        if stop is not None and stop < entry:
+            risk = entry - stop
+            return build_signal("Bollinger Trend Reversal", market_code, "LONG", entry,
+                                "MARKET", stop, entry + 1.5*risk, entry + 2.5*risk,
+                                f"RSI: {float(rsi):.1f}")
     previous = df.iloc[-3]
-    if c >= upper and c < ema and rsi > 65 and _has_confirmed_selling_pressure(last, previous):
-        entry = c
-        sl = upper + atr
-        risk = sl - entry
-        if risk > 0:
-            tp1 = entry - (1.5 * risk)
-            market_type_str = "تعهدی / فیوچرز"
-            return f"🔴 <b>سیگنال شورت بولینگر (روند)</b>\n▫️ ارز: <code>{market_code}</code> ({market_type_str})\n📌 موقعیت: SHORT\n▫️ ورود: {entry:,.4f}\n▫️ RSI: {rsi:.1f}\n🛡 حد ضرر: {sl:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}"
+    if (close >= upper and close < ema and rsi > 65
+            and _has_confirmed_selling_pressure(candle, previous)):
+        entry = float(close)
+        stop = bollinger_stop(candle, "SHORT")
+        if stop is not None and stop > entry:
+            risk = stop - entry
+            return build_signal("Bollinger Trend Reversal", market_code, "SHORT", entry,
+                                "MARKET", stop, entry - 1.5*risk,
+                                extra=f"RSI: {float(rsi):.1f}")
     return None
 
 def check_pullback_strategy(df, market_code, is_margin=True):
-    """Identify a bullish pullback in an established uptrend using the closed candle.
-
-    Version 6: volume confirmation is now mandatory — the signal candle must print
-    volume >= PULLBACK_MIN_VOLUME_MULT * vol_ma20 (default 1.1x the 20-period
-    average volume). Previously only a weak rejection (< 0.7x vol_ma20) was applied.
-    The Sensi strategy is intentionally exempt from this rule.
-    """
     if df is None or len(df) < 55:
         return None
-
-    last = df.iloc[-2]
-    previous = df.iloc[-3]
-    close = last["close"]
-    open_price = last["open"]
-    high = last["high"]
-    low = last["low"]
-    ema = last["ema200"]
-    bb_middle = last["bb_middle"]
-    rsi = last["rsi"]
-    atr = last["atr"]
-    vol_ma20 = last["vol_ma20"]
-
-    required = [close, open_price, high, low, ema, bb_middle, rsi]
-    if any(pd.isna(value) for value in required) or close <= 0 or ema <= 0:
+    candle, previous = df.iloc[-2], df.iloc[-3]
+    close, op, high, low = (float(candle[k]) for k in ("close", "open", "high", "low"))
+    ema, middle, rsi, atr = candle["ema200"], candle["bb_middle"], candle["rsi"], candle["atr"]
+    vol_ma20 = candle["vol_ma20"]
+    if any(pd.isna(v) for v in (ema, middle, rsi)) or close <= 0 or ema <= 0:
         return None
-    if pd.isna(atr) or atr <= 0:
-        atr = close * 0.01
-
-    # Trend context: price above EMA200 and EMA200 rising versus five candles ago.
     ema_5_ago = df.iloc[-7]["ema200"]
     if pd.isna(ema_5_ago) or close <= ema or ema <= ema_5_ago:
         return None
-
-    # Pullback reaches the BB middle / EMA20 area, then closes back above it.
-    touch_zone = low <= bb_middle * 1.01 and low >= bb_middle * 0.97
-    bullish_reclaim = close > open_price and close > bb_middle and previous["close"] <= previous["bb_middle"] * 1.01
-    if not (touch_zone and bullish_reclaim and 35 <= rsi <= 60):
+    touch_zone = low <= middle * 1.01 and low >= middle * 0.97
+    reclaim = close > op and close > middle and previous["close"] <= previous["bb_middle"] * 1.01
+    if not (touch_zone and reclaim and 35 <= rsi <= 60):
         return None
-
-    # ==== Volume confirmation (strict, v6) ====
-    # The pullback signal candle must show above-average participation:
-    # volume >= PULLBACK_MIN_VOLUME_MULT * vol_ma20 (default: >= 1.1 * vol_ma20).
-    # If the 20-period average volume is unavailable/invalid, no signal is allowed.
-    if pd.isna(vol_ma20) or vol_ma20 <= 0:
+    if pd.isna(vol_ma20) or vol_ma20 <= 0 or candle["volume"] < PULLBACK_MIN_VOLUME_MULT * vol_ma20:
         return None
-    if last["volume"] < PULLBACK_MIN_VOLUME_MULT * vol_ma20:
+    if pd.isna(atr) or atr <= 0:
+        atr = close * 0.01
+    # Prefer a resting bid at the BB middle; never suggest a buy above the signal close.
+    entry = min(close, float(middle))
+    stop = bollinger_stop(candle, "LONG")
+    if stop is None or stop >= entry:
         return None
+    risk = entry - stop
+    ratio = float(candle["volume"] / vol_ma20)
+    return build_signal("Bullish Trend Pullback", market_code, "LONG", entry, "LIMIT",
+                        stop, entry + 1.5*risk, entry + 2.5*risk,
+                        f"RSI: {float(rsi):.1f} | Volume: {ratio:.2f}x 20-candle average")
 
-    entry = close
-    sl = min(low, bb_middle) - 0.5 * atr
-    risk = entry - sl
-    if risk <= 0:
-        return None
-    tp1 = entry + 1.5 * risk
-    tp2 = entry + 2.5 * risk
-    vol_ratio = last["volume"] / vol_ma20
-    market_type_str = "تعهدی / فیوچرز"
-    return (f"↗️ <b>سیگنال لانگ پولبک (روند صعودی)</b>\n"
-            f"▫️ ارز: <code>{market_code}</code> ({market_type_str})\n"
-            f"📌 موقعیت: LONG\n"
-            f"▫️ ورود: {entry:,.4f}\n"
-            f"🛡 حد ضرر: {sl:,.4f}\n"
-            f"🎯 حد سود ۱: {tp1:,.4f}\n"
-            f"🎯 حد سود ۲: {tp2:,.4f}\n"
-            f"▫️ RSI: {rsi:.1f}\n"
-            f"▫️ حجم: {vol_ratio:.2f}x میانگین")
-
-# ================= Break & Retest (SHORT only) =================
 def check_short_break_retest(df, market_code):
     """Track a strong lower-Bollinger breakout, then alert on bearish retest rejection."""
     if df is None or len(df) < 55:
@@ -385,18 +375,14 @@ def check_short_break_retest(df, market_code):
                 atr = candle.get("atr", float("nan"))
                 if pd.isna(atr) or atr <= 0:
                     atr = entry * 0.01
-                stop = pending["swing_high"] + 0.20 * float(atr)
-                risk = stop - entry
+                stop = bollinger_stop(candle, "SHORT")
+                risk = stop - entry if stop is not None else -1
                 BR_PENDING_SHORT.pop(market_code, None)
                 if risk <= 0:
                     return None
-                tp1 = entry - risk
-                tp2 = entry - 2.0 * risk
-                return (f"🔻 <b>سیگنال شورت Break & Retest (شکست و پولبک)</b>\n"
-                        f"▫️ ارز: <code>{market_code}</code> (تعهدی / فیوچرز)\n"
-                        f"📌 موقعیت: SHORT\n▫️ ورود: {entry:,.4f}\n"
-                        f"🛡 حد ضرر: {stop:,.4f}\n🎯 حد سود ۱: {tp1:,.4f}\n"
-                        f"🎯 حد سود ۲: {tp2:,.4f}\n▫️ سطح شکست بولینگر: {level:,.4f}")
+                return build_signal("Lower-Bollinger Break & Retest", market_code, "SHORT", entry,
+                                    "MARKET", stop, entry - risk, entry - 2.0*risk,
+                                    f"Breakout Level: {format_price(level)}")
 
     if pending is None:
         lower = candle.get("bb_lower", float("nan"))
@@ -457,15 +443,12 @@ def tracker_stats():
     with tracker_lock:
         signals = list(signal_tracker.values())
     total = len(signals)
-    wins = sum(1 for s in signals if s.get("status") == "HIT_TP1")
-    losses = sum(1 for s in signals if s.get("status") == "HIT_SL")
-    open_signals = sum(1 for s in signals if s.get("status") == "OPEN")
-    ambiguous = sum(1 for s in signals if s.get("status") == "AMBIGUOUS")
-    decided = wins + losses
-    win_rate = (wins / decided * 100) if decided > 0 else 0.0
-    return total, wins, losses, open_signals, win_rate, ambiguous
+    wins = sum(1 for item in signals if item.get("status") == "HIT_TP1")
+    losses = sum(1 for item in signals if item.get("status") == "HIT_SL")
+    open_signals = sum(1 for item in signals if item.get("status") == "OPEN")
+    ambiguous = sum(1 for item in signals if item.get("status") == "AMBIGUOUS")
+    return total, wins, losses, open_signals, ambiguous
 
-# ================= بولینگر اسکوییز (فیلتر فشردگی باند) =================
 def is_squeeze(df):
     try:
         bw = df.iloc[-2]["bandwidth"]
@@ -517,13 +500,12 @@ def run_signal_tracker():
                 save_tracker()
                 emoji = "✅" if status == "HIT_TP1" else ("❌" if status == "HIT_SL" else "⚠️")
                 pos = "LONG" if sig["direction"] == "LONG" else "SHORT"
-                send_telegram(f"{emoji} <b>{status.replace('HIT_TP1','HIT TP1').replace('HIT_SL','HIT SL').replace('AMBIGUOUS','مبهم')}</b>\n"
-                              f"▫️ ارز: <code>{sig['symbol']}</code>\n"
-                              f"📌 موقعیت: {pos}\n"
-                              f"▫️ استراتژی: {sig['strategy']}\n"
-                              f"▫️ قیمت فعلی: {current_price:,.4f}\n"
-                              f"🎯 حد سود ۱: {sig['tp1']:,.4f}\n"
-                              f"🛡 حد ضرر: {sig['sl']:,.4f}")
+                status_text = status.replace("HIT_TP1", "HIT TP1").replace("HIT_SL", "HIT SL")
+                send_telegram(f"{emoji} <b>{status_text}</b>\nSymbol: <code>{sig['symbol']}</code>\n"
+                              f"Strategy: {sig['strategy']}\nSide: {pos}\nCurrent Price:\n"
+                              f"<code>{format_price(current_price)}</code>\nTake Profit 1:\n"
+                              f"<code>{format_price(sig['tp1'])}</code>\nStop Loss:\n"
+                              f"<code>{format_price(sig['sl'])}</code>")
         except Exception as e:
             print(f"[Tracker Loop Error] {e}")
 
@@ -542,16 +524,15 @@ def telegram_stats_command_handler():
                 text = (msg.get("text") or "").strip()
                 chat_id = msg.get("chat", {}).get("id")
                 if text.startswith("/stats") and chat_id is not None:
-                    total, wins, losses, open_signals, win_rate, ambiguous = tracker_stats()
+                    total, wins, losses, open_signals, ambiguous = tracker_stats()
                     report = (
                         "📊 <b>گزارش سیگنال‌ها (/stats)</b>\n\n"
                         f"▫️ کل سیگنال‌ها: {total}\n"
                         f"✅ بردها (TP1): {wins}\n"
                         f"❌ باخت‌ها (SL): {losses}\n"
                         f"⏳ باز: {open_signals}\n"
-                        f"⚠️ مبهم: {ambiguous}\n"
-                        f"🏆 وین‌ریت: {win_rate:.1f}%\n\n"
-                        "<i>بردها = TP1 قبل از SL، باخت‌ها = SL قبل از TP1</i>"
+                        f"⚠️ Ambiguous: {ambiguous}\n\n"
+                        "<i>Wins = TP1 before SL; losses = SL before TP1.</i>"
                     )
                     try:
                         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
@@ -579,27 +560,46 @@ def btc_long_middle_band_confirmed():
 
 # ================= ثبت و ارسال سیگنال =================
 def extract_signal_details(msg):
-    def num(pat):
-        m = re.search(pat, msg)
-        return float(m.group(1).replace(",", "")) if m else None
-    entry = num(r"ورود: ([\d,\.]+)")
-    sl = num(r"حد ضرر: ([\d,\.]+)")
-    tp1 = num(r"حد سود(?: ۱)?: ([\d,\.]+)")
-    direction = "SHORT" if "موقعیت: SHORT" in msg else "LONG"
+    def num(label):
+        pattern = rf"{label}:\s*<code>([0-9]+(?:\.[0-9]+)?)</code>"
+        match = re.search(pattern, msg)
+        return float(match.group(1)) if match else None
+    entry = num("Entry Price")
+    sl = num("Stop Loss")
+    tp1 = num("Take Profit 1")
+    direction = "SHORT" if re.search(r"Side:\s*SHORT", msg) else "LONG"
     return direction, entry, sl, tp1
 
 def register_and_send(strategy_name, msg, symbol, is_margin=True, long_confirmed=False):
     direction, entry, sl, tp1 = extract_signal_details(msg)
+    if entry is None or sl is None or tp1 is None:
+        print(f"[Signal] Rejected malformed signal for {symbol} ({strategy_name}).")
+        return False
     if direction == "LONG" and not long_confirmed:
         print(f"[BTC filter] Blocked LONG signal for {symbol}: BTC 15m/1h middle-band confirmation failed.")
-        return
+        return False
+    now = datetime.now(timezone.utc)
+    with tracker_lock:
+        for record in signal_tracker.values():
+            if (record.get("symbol") == symbol and record.get("strategy") == strategy_name
+                    and record.get("direction") == direction):
+                if record.get("status") == "OPEN":
+                    print(f"[Duplicate] Active {strategy_name} {direction} already tracked for {symbol}.")
+                    return False
+                try:
+                    created = datetime.fromisoformat(record.get("timestamp", ""))
+                    if created.tzinfo is None:
+                        created = created.replace(tzinfo=timezone.utc)
+                    if now - created < timedelta(minutes=15):
+                        print(f"[Duplicate] {strategy_name} {direction} already issued for {symbol} in this candle.")
+                        return False
+                except (TypeError, ValueError):
+                    pass
     if not send_telegram(msg):
-        return
-    if entry is None:
-        return
-    add_signal(symbol, direction, entry, sl if sl is not None else 0.0, tp1 if tp1 is not None else 0.0, strategy_name, is_margin)
+        return False
+    add_signal(symbol, direction, entry, sl, tp1, strategy_name, is_margin)
+    return True
 
-# ================= حلقه اصلی پایش و اسکن بازار =================
 def run_scanner():
     print("Market scanner started successfully.")
 
