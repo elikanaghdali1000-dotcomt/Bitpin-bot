@@ -220,16 +220,38 @@ def bollinger_stop(candle, direction):
     buffer = 0.10 * float(atr)
     return float(band) - buffer if direction == "LONG" else float(band) + buffer
 
+def risk_target(entry, direction, risk, multiple=1.5):
+    """Calculate a TP in the profitable direction from entry, never toward the stop."""
+    entry, risk, multiple = float(entry), float(risk), float(multiple)
+    if direction not in ("LONG", "SHORT") or not math.isfinite(entry + risk + multiple):
+        raise ValueError("Invalid direction or non-finite risk/entry/target multiple")
+    if entry <= 0 or risk <= 0 or multiple <= 0:
+        raise ValueError("Entry, risk, and target multiple must be positive")
+    target = entry + risk * multiple if direction == "LONG" else entry - risk * multiple
+    if (direction == "LONG" and target <= entry) or (direction == "SHORT" and target >= entry):
+        raise ValueError("Take-profit must lie beyond entry in the profitable direction")
+    return target
+
 def build_signal(strategy, market_code, direction, entry, order_type, stop, tp1, tp2=None, extra=None):
+    entry, stop, tp1 = float(entry), float(stop), float(tp1)
+    if direction not in ("LONG", "SHORT"):
+        raise ValueError(f"Unsupported signal direction: {direction}")
+    valid = (stop < entry and tp1 > entry) if direction == "LONG" else (stop > entry and tp1 < entry)
+    if not valid:
+        raise ValueError(f"Invalid {direction} signal levels: require SL/TP on opposite sides of entry")
+    if tp2 is not None:
+        tp2 = float(tp2)
+        if (direction == "LONG" and tp2 <= entry) or (direction == "SHORT" and tp2 >= entry):
+            raise ValueError(f"Invalid {direction} TP2: must lie in the profitable direction")
     side_emoji = "🟢" if direction == "LONG" else "🔴"
-    lines = [f"{side_emoji} <b>{direction} SIGNAL | {strategy}</b>",
+    lines = [f"{side_emoji} <b>{direction} SIGNAL</b>",
              f"Symbol: <code>{market_code}</code>", f"Strategy: {strategy}",
              f"Side: {direction}", f"Entry Type: {order_type}",
-             "Entry Price:", f"<code>{format_price(entry)}</code>",
-             "Stop Loss:", f"<code>{format_price(stop)}</code>",
-             "Take Profit 1:", f"<code>{format_price(tp1)}</code>"]
+             f"💰 Entry Price: <code>{format_price(entry)}</code>",
+             f"Take Profit 1: <code>{format_price(tp1)}</code>"]
     if tp2 is not None:
-        lines.extend(["Take Profit 2:", f"<code>{format_price(tp2)}</code>"])
+        lines.append(f"✅ Take Profit 2: <code>{format_price(tp2)}</code>")
+    lines.append(f"🔴 Stop Loss: <code>{format_price(stop)}</code>")
     if extra:
         lines.append(extra)
     return "\n".join(lines)
@@ -253,8 +275,9 @@ def check_sensi_strategy(df, market_code, is_margin=True):
         stop = bollinger_stop(candle, "LONG")
         if stop is not None and stop < entry:
             risk = entry - stop
-            return build_signal("Sensi Volume-Dry Reversal", market_code, "LONG", entry,
-                                "LIMIT", stop, entry + 1.5*risk, entry + 2.5*risk)
+            return build_signal("بازگشت سنسی با کاهش حجم", market_code, "LONG", entry,
+                                "MARKET", stop, risk_target(entry, "LONG", risk, 1.5),
+                                risk_target(entry, "LONG", risk, 2.5))
 
     near_resistance = resistance * 0.992 <= candle["high"] <= resistance * 1.003
     previous = df.iloc[-3]
@@ -265,8 +288,8 @@ def check_sensi_strategy(df, market_code, is_margin=True):
         stop = bollinger_stop(candle, "SHORT")
         if stop is not None and stop > entry:
             risk = stop - entry
-            return build_signal("Sensi Volume-Dry Reversal", market_code, "SHORT", entry,
-                                "LIMIT", stop, entry - 1.5*risk)
+            return build_signal("بازگشت سنسی با کاهش حجم", market_code, "SHORT", entry,
+                                "MARKET", stop, risk_target(entry, "SHORT", risk, 1.5))
     return None
 
 def check_trend_strategy(df, market_code, is_margin=True):
@@ -282,8 +305,9 @@ def check_trend_strategy(df, market_code, is_margin=True):
         stop = bollinger_stop(candle, "LONG")
         if stop is not None and stop < entry:
             risk = entry - stop
-            return build_signal("Bollinger Trend Reversal", market_code, "LONG", entry,
-                                "MARKET", stop, entry + 1.5*risk, entry + 2.5*risk,
+            return build_signal("بازگشت روند بولینگر", market_code, "LONG", entry,
+                                "MARKET", stop, risk_target(entry, "LONG", risk, 1.5),
+                                risk_target(entry, "LONG", risk, 2.5),
                                 f"RSI: {float(rsi):.1f}")
     previous = df.iloc[-3]
     if (close >= upper and close < ema and rsi > 65
@@ -292,8 +316,8 @@ def check_trend_strategy(df, market_code, is_margin=True):
         stop = bollinger_stop(candle, "SHORT")
         if stop is not None and stop > entry:
             risk = stop - entry
-            return build_signal("Bollinger Trend Reversal", market_code, "SHORT", entry,
-                                "MARKET", stop, entry - 1.5*risk,
+            return build_signal("بازگشت روند بولینگر", market_code, "SHORT", entry,
+                                "MARKET", stop, risk_target(entry, "SHORT", risk, 1.5),
                                 extra=f"RSI: {float(rsi):.1f}")
     return None
 
@@ -324,7 +348,7 @@ def check_pullback_strategy(df, market_code, is_margin=True):
         return None
     risk = entry - stop
     ratio = float(candle["volume"] / vol_ma20)
-    return build_signal("Bullish Trend Pullback", market_code, "LONG", entry, "LIMIT",
+    return build_signal("پولبک روند صعودی", market_code, "LONG", entry, "LIMIT",
                         stop, entry + 1.5*risk, entry + 2.5*risk,
                         f"RSI: {float(rsi):.1f} | Volume: {ratio:.2f}x 20-candle average")
 
@@ -380,8 +404,9 @@ def check_short_break_retest(df, market_code):
                 BR_PENDING_SHORT.pop(market_code, None)
                 if risk <= 0:
                     return None
-                return build_signal("Lower-Bollinger Break & Retest", market_code, "SHORT", entry,
-                                    "MARKET", stop, entry - risk, entry - 2.0*risk,
+                return build_signal("شکست و بازآزمایی باند پایینی بولینگر", market_code, "SHORT", entry,
+                                    "LIMIT", stop, risk_target(entry, "SHORT", risk, 1.0),
+                                    risk_target(entry, "SHORT", risk, 2.0),
                                     f"Breakout Level: {format_price(level)}")
 
     if pending is None:
@@ -574,6 +599,10 @@ def register_and_send(strategy_name, msg, symbol, is_margin=True, long_confirmed
     direction, entry, sl, tp1 = extract_signal_details(msg)
     if entry is None or sl is None or tp1 is None:
         print(f"[Signal] Rejected malformed signal for {symbol} ({strategy_name}).")
+        return False
+    geometry_ok = (sl < entry < tp1) if direction == "LONG" else (tp1 < entry < sl)
+    if not geometry_ok:
+        print(f"[Signal] Rejected invalid {direction} SL/entry/TP ordering for {symbol} ({strategy_name}).")
         return False
     if direction == "LONG" and not long_confirmed:
         print(f"[BTC filter] Blocked LONG signal for {symbol}: BTC 15m/1h middle-band confirmation failed.")
