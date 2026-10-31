@@ -800,4 +800,34 @@ def main_scanner_loop():
                             sl_val = last_c - (1.5 * atr_val) if direction == "LONG" else last_c + (1.5 * atr_val)
                             tp1_val = last_c + (2.0 * atr_val) if direction == "LONG" else last_c - (2.0 * atr_val)
 
-                            send_telegram(signal_msg
+                            send_telegram(signal_msg)
+                            add_signal(symbol, direction, last_c, sl_val, tp1_val, strat_name)
+                            time.sleep(1)
+                    except Exception as e:
+                        print(f"Error in {strat_name} for {symbol}: {e}")
+
+                time.sleep(1)
+
+            if scanned_count > 0:
+                notify_first_successful_scan(scanned_count)
+
+            time.sleep(CHECK_INTERVAL)
+        except Exception as exc:
+            print(f"Main loop error: {exc}")
+            time.sleep(15)
+
+
+# ================= نقطه شروع برنامه =================
+if __name__ == "__main__":
+    try:
+        print("Starting HTTP Server thread...")
+        threading.Thread(target=run_http_server, daemon=True).start()
+        threading.Thread(target=self_ping, daemon=True).start()
+        threading.Thread(target=run_signal_tracker, daemon=True).start()
+        threading.Thread(target=telegram_stats_command_handler, daemon=True).start()
+
+        main_scanner_loop()
+    except KeyboardInterrupt:
+        print("Bot stopped manually.")
+    except Exception as e:
+        print(f"Fatal error in main execution: {e}")
