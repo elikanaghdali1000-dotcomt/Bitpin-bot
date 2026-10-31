@@ -233,11 +233,30 @@ def calculate_indicators(df):
     return df
 
 
-def check_bitcoin_filter(btc_df):
-    if btc_df is None or len(btc_df) < 20:
+def check_bitcoin_filter():
+    try:
+        # بررسی تایم‌فریم ۱۵ دقیقه
+        btc_15m = fetch_bitpin_candles("BTC_USDT", resolution="15", count=60)
+        btc_15m = closed_candles(btc_15m, resolution="15")
+        btc_15m = calculate_indicators(btc_15m)
+        if btc_15m is None or btc_15m.empty:
+            return True
+        last_15m = btc_15m.iloc[-1]
+        ok_15m = last_15m["close"] >= last_15m["bb_middle"]
+
+        # بررسی تایم‌فریم ۱ ساعته
+        btc_1h = fetch_bitpin_candles("BTC_USDT", resolution="60", count=60)
+        btc_1h = closed_candles(btc_1h, resolution="60")
+        btc_1h = calculate_indicators(btc_1h)
+        if btc_1h is None or btc_1h.empty:
+            return ok_15m
+        last_1h = btc_1h.iloc[-1]
+        ok_1h = last_1h["close"] >= last_1h["bb_middle"]
+
+        return ok_15m and ok_1h
+    except Exception as exc:
+        print(f"Error in check_bitcoin_filter: {exc}")
         return True
-    last = btc_df.iloc[-1]
-    return last["close"] >= last["bb_middle"]
 
 
 def check_macro_trend_1h(market_code):
@@ -394,7 +413,7 @@ def check_trend_strategy(df, market_code):
                 f"🎯 سود ۱: {c + 1.5 * risk:,.4f}\n🎯 سود ۲: {c + 2.5 * risk:,.4f}"
             )
     if (
-        c >= upper and c < ema and rsi > 65
+        c >= upper and c < ema and rsi > 50
         and _has_confirmed_selling_pressure(last, df.iloc[-2])
     ):
         sl = upper + 0.5 * atr
@@ -750,10 +769,9 @@ def main_scanner_loop():
     while True:
         try:
             scanned_count = 0
-            btc_df = fetch_bitpin_candles("BTC_USDT", resolution=TIMEFRAME, count=50)
-            btc_df = closed_candles(btc_df, resolution=TIMEFRAME)
-            btc_df = calculate_indicators(btc_df)
-            btc_ok = check_bitcoin_filter(btc_df)
+            
+            # بررسی روند بیت‌کوین برای فیلتر سیگنال‌های LONG
+            btc_bullish = check_bitcoin_filter()
 
             for symbol in MARGIN_SYMBOLS:
                 df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=100)
@@ -793,6 +811,12 @@ def main_scanner_loop():
                         signal_msg = strat_func(df_ind)
                         if signal_msg:
                             direction = "LONG" if "LONG" in signal_msg or "لانگ" in signal_msg else "SHORT"
+                            
+                            # اعمال شرط بیت‌کوین برای تمام استراتژی‌ها به غیر از سنسی (SENSI)
+                            if strat_name != "SENSI":
+                                if direction == "LONG" and not btc_bullish:
+                                    continue
+
                             signal_df = df_live_ind if strat_name == "SENSI" and df_live_ind is not None else df_ind
                             last_c = float(signal_df.iloc[-1]["close"])
                             atr_val = float(signal_df.iloc[-1]["atr"]) if not pd.isna(signal_df.iloc[-1]["atr"]) else last_c * 0.01
