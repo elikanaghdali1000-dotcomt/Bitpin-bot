@@ -768,12 +768,20 @@ def main_scanner_loop():
                     time.sleep(0.5)
                     continue
 
+                # کندل باز/زنده صرفاً جهت استفاده در استراتژی سنسی (SENSI)
+                last_live_ts = int(df.iloc[-1]["timestamp"])
+                now_ts = time.time()
+                is_open_candle = (
+                    last_live_ts <= now_ts < last_live_ts + TIMEFRAME_SECONDS
+                )
+                df_live_ind = calculate_indicators(df) if is_open_candle else None
+
                 scanned_count += 1
 
                 # اجرای استراتژی‌ها
                 strategies = [
                     ("RSI_DIV", lambda d: check_rsi_divergence(d, symbol)),
-                    ("SENSI", lambda d: check_sensi_strategy(df_closed, symbol)),
+                    ("SENSI", lambda d: check_sensi_strategy(df_live_ind, symbol)),
                     ("BOLLINGER", lambda d: check_trend_strategy(d, symbol)),
                     ("PULLBACK", lambda d: check_pullback_strategy(d, symbol)),
                     ("BREAK_RETEST", lambda d: check_break_retest(d, symbol)),
@@ -785,30 +793,11 @@ def main_scanner_loop():
                         signal_msg = strat_func(df_ind)
                         if signal_msg:
                             direction = "LONG" if "LONG" in signal_msg or "لانگ" in signal_msg else "SHORT"
-                            last_c = float(df_ind.iloc[-1]["close"])
-                            atr_val = float(df_ind.iloc[-1]["atr"]) if not pd.isna(df_ind.iloc[-1]["atr"]) else last_c * 0.01
+                            signal_df = df_live_ind if strat_name == "SENSI" and df_live_ind is not None else df_ind
+                            last_c = float(signal_df.iloc[-1]["close"])
+                            atr_val = float(signal_df.iloc[-1]["atr"]) if not pd.isna(signal_df.iloc[-1]["atr"]) else last_c * 0.01
                             
                             sl_val = last_c - (1.5 * atr_val) if direction == "LONG" else last_c + (1.5 * atr_val)
                             tp1_val = last_c + (2.0 * atr_val) if direction == "LONG" else last_c - (2.0 * atr_val)
 
-                            send_telegram(signal_msg)
-                            add_signal(symbol, direction, last_c, sl_val, tp1_val, strat_name)
-                            time.sleep(1)
-                    except Exception as e:
-                        print(f"Error in {strat_name} for {symbol}: {e}")
-
-                time.sleep(1)
-
-            if scanned_count > 0:
-                notify_first_successful_scan(scanned_count)
-
-            time.sleep(CHECK_INTERVAL)
-        except Exception as exc:
-            print(f"Main loop error: {exc}")
-            time.sleep(15)
-
-
-# ================= نقطه شروع برنامه =================
-if __name__ == "__main__":
-    try:
-        print("Starting HTTP Server thr
+                            send_telegram(signal_msg
