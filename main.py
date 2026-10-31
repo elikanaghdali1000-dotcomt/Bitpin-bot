@@ -28,7 +28,7 @@ TIMEFRAME = "15"      # تایم‌فریم ۱۵ دقیقه
 
 # فیلتر حجم استراتژی پولبک: کندل سیگنال باید حجمی >= این ضریب × vol_ma20 داشته باشد.
 # استراتژی سنسی از این قانون مستثناست (منطق «خشکی حجم» آن دست‌نخورده می‌ماند).
-PULLBACK_MIN_VOLUME_MULT = float(os.getenv("PULLBACK_MIN_VOLUME_MULT", "1.1"))
+PULLBACK_MIN_VOLUME_MULT = float(os.getenv("PULLBACK_MIN_VOLUME_MULT", ".85"))
 
 # وضعیت سیگنال‌ها در حافظه و فایل JSON
 tracker_lock = threading.RLock()
