@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "secret-51d7820c")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
@@ -25,6 +25,10 @@ TRACKER_FILE = os.getenv("SIGNAL_TRACKER_FILE", "signal_tracker.json")
 
 CHECK_INTERVAL = 60   # هر ۱ دقیقه چک می‌کند
 TIMEFRAME = "15"      # تایم‌فریم ۱۵ دقیقه
+
+# فیلتر حجم استراتژی پولبک: کندل سیگنال باید حجمی >= این ضریب × vol_ma20 داشته باشد.
+# استراتژی سنسی از این قانون مستثناست (منطق «خشکی حجم» آن دست‌نخورده می‌ماند).
+PULLBACK_MIN_VOLUME_MULT = float(os.getenv("PULLBACK_MIN_VOLUME_MULT", "1.1"))
 
 # وضعیت سیگنال‌ها در حافظه و فایل JSON
 tracker_lock = threading.RLock()
@@ -208,6 +212,7 @@ def check_sensi_strategy(df, market_code, is_margin=True):
         return None
 
     vol_ratio = current_vol / vol_ma20
+    # سنسی عمداً از فیلتر حجم بالای پولبک مستثناست: منطق آن خشکی حجم است.
     is_volume_dried = vol_ratio < 0.70
     atr = sig_candle.get("atr", (sig_candle["high"] - sig_candle["low"]))
     if pd.isna(atr) or atr == 0:
@@ -265,7 +270,13 @@ def check_trend_strategy(df, market_code, is_margin=True):
     return None
 
 def check_pullback_strategy(df, market_code, is_margin=True):
-    """Identify a bullish pullback in an established uptrend using the closed candle."""
+    """Identify a bullish pullback in an established uptrend using the closed candle.
+
+    Version 6: volume confirmation is now mandatory — the signal candle must print
+    volume >= PULLBACK_MIN_VOLUME_MULT * vol_ma20 (default 1.1x the 20-period
+    average volume). Previously only a weak rejection (< 0.7x vol_ma20) was applied.
+    The Sensi strategy is intentionally exempt from this rule.
+    """
     if df is None or len(df) < 55:
         return None
 
@@ -297,7 +308,14 @@ def check_pullback_strategy(df, market_code, is_margin=True):
     bullish_reclaim = close > open_price and close > bb_middle and previous["close"] <= previous["bb_middle"] * 1.01
     if not (touch_zone and bullish_reclaim and 35 <= rsi <= 60):
         return None
-    if not pd.isna(vol_ma20) and vol_ma20 > 0 and last["volume"] < 0.7 * vol_ma20:
+
+    # ==== Volume confirmation (strict, v6) ====
+    # The pullback signal candle must show above-average participation:
+    # volume >= PULLBACK_MIN_VOLUME_MULT * vol_ma20 (default: >= 1.1 * vol_ma20).
+    # If the 20-period average volume is unavailable/invalid, no signal is allowed.
+    if pd.isna(vol_ma20) or vol_ma20 <= 0:
+        return None
+    if last["volume"] < PULLBACK_MIN_VOLUME_MULT * vol_ma20:
         return None
 
     entry = close
@@ -307,6 +325,7 @@ def check_pullback_strategy(df, market_code, is_margin=True):
         return None
     tp1 = entry + 1.5 * risk
     tp2 = entry + 2.5 * risk
+    vol_ratio = last["volume"] / vol_ma20
     market_type_str = "تعهدی / فیوچرز"
     return (f"↗️ <b>سیگنال لانگ پولبک (روند صعودی)</b>\n"
             f"▫️ ارز: <code>{market_code}</code> ({market_type_str})\n"
@@ -315,7 +334,8 @@ def check_pullback_strategy(df, market_code, is_margin=True):
             f"🛡 حد ضرر: {sl:,.4f}\n"
             f"🎯 حد سود ۱: {tp1:,.4f}\n"
             f"🎯 حد سود ۲: {tp2:,.4f}\n"
-            f"▫️ RSI: {rsi:.1f}")
+            f"▫️ RSI: {rsi:.1f}\n"
+            f"▫️ حجم: {vol_ratio:.2f}x میانگین")
 
 # ================= Break & Retest (SHORT only) =================
 def check_short_break_retest(df, market_code):
