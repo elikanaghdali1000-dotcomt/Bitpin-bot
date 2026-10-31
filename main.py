@@ -266,7 +266,7 @@ def check_sensi_strategy(df, market_code, is_margin=True):
     vol_ma20 = candle["vol_ma20"]
     if pd.isna(vol_ma20) or vol_ma20 == 0:
         return None
-    dried = candle["volume"] / vol_ma20 < 0.70
+    dried = candle["volume"] < vol_ma20 * 0.50
     near_support = support * 0.992 <= candle["low"] <= support * 1.003
     bullish = (candle["close"] > candle["open"] or
                candle["close"] > candle["low"] + 0.6 * (candle["high"] - candle["low"]))
@@ -283,7 +283,7 @@ def check_sensi_strategy(df, market_code, is_margin=True):
     previous = df.iloc[-3]
     confirmed = _has_confirmed_selling_pressure(candle, previous)
     live_bearish = df.iloc[-1]["close"] < df.iloc[-1]["open"]
-    if near_resistance and confirmed and candle["close"] < candle["open"] and live_bearish:
+    if near_resistance and dried and confirmed and candle["close"] < candle["open"] and live_bearish:
         entry = float(candle["close"])
         stop = bollinger_stop(candle, "SHORT")
         if stop is not None and stop > entry:
