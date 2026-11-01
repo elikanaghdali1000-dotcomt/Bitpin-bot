@@ -279,16 +279,17 @@ def check_sensi_strategy(df, market_code, is_margin=True):
                                 risk_target(entry, "LONG", risk, 2.5))
 
     near_resistance = resistance * 0.992 <= candle["high"] <= resistance * 1.003
-    previous = df.iloc[-2]
-    confirmed = _has_confirmed_selling_pressure(candle, previous)
-    live_bearish = candle["close"] < candle["open"]
-    if near_resistance and dried and confirmed and candle["close"] < candle["open"] and live_bearish:
+    candle_range = float(candle["high"] - candle["low"])
+    bearish = (candle["close"] < candle["open"] or
+               (candle_range > 0 and candle["close"] < candle["low"] + 0.4 * candle_range))
+    if near_resistance and dried and bearish:
         entry = float(candle["close"])
         stop = bollinger_stop(candle, "SHORT")
         if stop is not None and stop > entry:
             risk = stop - entry
             return build_signal("بازگشت سنسی با کاهش حجم", market_code, "SHORT", entry,
-                                "MARKET", stop, risk_target(entry, "SHORT", risk, 1.5))
+                                "MARKET", stop, risk_target(entry, "SHORT", risk, 1.5),
+                                risk_target(entry, "SHORT", risk, 2.5))
     return None
 
 def check_trend_strategy(df, market_code, is_margin=True):
