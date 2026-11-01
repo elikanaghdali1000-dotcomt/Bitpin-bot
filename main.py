@@ -245,9 +245,9 @@ def build_signal(strategy, market_code, direction, entry, order_type, stop, tp1,
              f"Symbol: <code>{market_code}</code>", f"Strategy: {strategy}",
              f"Side: {direction}", f"Entry Type: {order_type}",
              f"💰 Entry Price: <code>{format_price(entry)}</code>",
-             f"Take Profit 1: <code>{format_price(tp1)}</code>"]
+             f"🎯 TP1: <code>{format_price(tp1)}</code>"]
     if tp2 is not None:
-        lines.append(f"✅ Take Profit 2: <code>{format_price(tp2)}</code>")
+        lines.append(f"✅ TP2: <code>{format_price(tp2)}</code>")
     lines.append(f"🔴 Stop Loss: <code>{format_price(stop)}</code>")
     if extra:
         lines.append(extra)
@@ -257,13 +257,15 @@ def build_signal(strategy, market_code, direction, entry, order_type, stop, tp1,
 def check_sensi_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
         return None
-    candle = df.iloc[-2]
-    window = df.iloc[-27:-2]
+    # At the close-phase scan (150 seconds before close), evaluate the live
+    # forming candle itself and compare it with the 15 candles immediately before it.
+    candle = df.iloc[-1]
+    window = df.iloc[-26:-1]
     support, resistance = window["low"].min(), window["high"].max()
-    vol_ma20 = candle["vol_ma20"]
-    if pd.isna(vol_ma20) or vol_ma20 == 0:
+    min_vol_15 = df.iloc[-16:-1]["volume"].min()
+    if pd.isna(min_vol_15):
         return None
-    dried = candle["volume"] < vol_ma20 * 0.50
+    dried = candle["volume"] <= min_vol_15
     near_support = support * 0.992 <= candle["low"] <= support * 1.003
     bullish = (candle["close"] > candle["open"] or
                candle["close"] > candle["low"] + 0.6 * (candle["high"] - candle["low"]))
@@ -277,9 +279,9 @@ def check_sensi_strategy(df, market_code, is_margin=True):
                                 risk_target(entry, "LONG", risk, 2.5))
 
     near_resistance = resistance * 0.992 <= candle["high"] <= resistance * 1.003
-    previous = df.iloc[-3]
+    previous = df.iloc[-2]
     confirmed = _has_confirmed_selling_pressure(candle, previous)
-    live_bearish = df.iloc[-1]["close"] < df.iloc[-1]["open"]
+    live_bearish = candle["close"] < candle["open"]
     if near_resistance and dried and confirmed and candle["close"] < candle["open"] and live_bearish:
         entry = float(candle["close"])
         stop = bollinger_stop(candle, "SHORT")
@@ -588,7 +590,7 @@ def extract_signal_details(msg):
         return float(match.group(1)) if match else None
     entry = num("Entry Price")
     sl = num("Stop Loss")
-    tp1 = num("Take Profit 1")
+    tp1 = num("TP1") or num("Take Profit 1")
     direction = "SHORT" if re.search(r"Side:\s*SHORT", msg) else "LONG"
     return direction, entry, sl, tp1
 
@@ -601,7 +603,7 @@ def register_and_send(strategy_name, msg, symbol, is_margin=True, long_confirmed
     if not geometry_ok:
         print(f"[Signal] Rejected invalid {direction} SL/entry/TP ordering for {symbol} ({strategy_name}).")
         return False
-    if direction == "LONG" and not long_confirmed:
+    if direction == "LONG" and not long_confirmed and strategy_name.lower() != "sensi":
         print(f"[BTC filter] Blocked LONG signal for {symbol}: BTC 15m/1h middle-band confirmation failed.")
         return False
     now = datetime.now(timezone.utc)
