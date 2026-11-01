@@ -120,12 +120,12 @@ def fetch_bitpin_candles(market_code, resolution=TIMEFRAME, count=100):
         }
         headers = {"User-Agent": "Mozilla/5.0"}
         r = requests.get(OHLC_URL, params=params, headers=headers, timeout=15)
-        
+
         if r.status_code != 200:
             return None
-            
+
         data = r.json()
-        
+
         if not data or not isinstance(data, list):
             if isinstance(data, dict) and "output" in data:
                 data = data["output"]
@@ -133,7 +133,7 @@ def fetch_bitpin_candles(market_code, resolution=TIMEFRAME, count=100):
                 return None
 
         timestamps, opens, highs, lows, closes, volumes = [], [], [], [], [], []
-        
+
         for c in data:
             timestamps.append(int(c.get("time", c.get("t", 0))))
             opens.append(float(c.get("open", c.get("o", 0))))
@@ -199,14 +199,11 @@ def _has_confirmed_selling_pressure(candle, previous_candle):
     )
 
 def format_price(value):
-    """Render a plain, copyable price with useful precision and no separators."""
+    """Render a plain, copyable price with exactly six decimal places."""
     value = float(value)
     if not math.isfinite(value):
         raise ValueError("Signal price must be finite")
-    if value == 0:
-        return "0.00"
-    decimals = max(2, min(10, 7 - int(math.floor(math.log10(abs(value))))))
-    return f"{value:.{decimals}f}".rstrip("0").rstrip(".")
+    return f"{value:.6f}"
 
 def bollinger_stop(candle, direction):
     """Place stop just beyond the nearest directional Bollinger band."""
@@ -357,7 +354,7 @@ def check_short_break_retest(df, market_code):
     if df is None or len(df) < 55:
         return None
 
-    candle = df.iloc[-2]  
+    candle = df.iloc[-2]
     previous = df.iloc[-3]
     timestamp = candle.get("timestamp", None)
     if timestamp is None:
