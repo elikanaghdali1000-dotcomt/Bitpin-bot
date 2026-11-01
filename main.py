@@ -21,7 +21,7 @@ OHLC_URL = f"{BASE_API}/v1/mkt/candles/"  # اندپوینت رسمی بیت‌�
 
 BB_PERIOD = 20
 BB_STD = 2.0
-BOLLINGER_SQUEEZE_THRESHOLD = float(os.getenv("BOLLINGER_SQUEEZE_THRESHOLD", "2.0"))  # درصد؛ کمتر از این مقدار سیگنال مسدود می‌شود
+BOLLINGER_SQUEEZE_THRESHOLD = float(os.getenv("BOLLINGER_SQUEEZE_THRESHOLD", "1.7"))  # درصد؛ کمتر از این مقدار سیگنال مسدود می‌شود
 TRACKER_FILE = os.getenv("SIGNAL_TRACKER_FILE", "signal_tracker.json")
 
 CHECK_INTERVAL = 60   # هر ۱ دقیقه چک می‌کند
