@@ -620,6 +620,8 @@ def tracker_stats():
 
 
 # ================= Order Book Watcher =================
+# Block new entries only when a nearby opposing whale wall is confirmed.
+WHALE_WALL_ENTRY_GATE_ENABLED = True
 ORDERBOOK_DEPTH_LEVELS = 15
 ORDERBOOK_IMBALANCE_MULT = 2.5
 ORDERBOOK_WHALE_DEPTH_FRACTION = 0.35
@@ -711,6 +713,21 @@ def analyze_order_book(book, direction, current_price):
     metrics["whale_walls"] = walls if "walls" in locals() else []
     metrics["total_depth"] = total
     return alerts, metrics
+
+def whale_wall_entry_blocked(symbol, direction, entry_price):
+    """Fail open if depth is unavailable; block only a nearby opposing whale wall."""
+    if not WHALE_WALL_ENTRY_GATE_ENABLED:
+        return False
+    book = fetch_order_book(symbol)
+    if not book:
+        return False
+    alerts, metrics = analyze_order_book(book, direction, entry_price)
+    walls = metrics.get("whale_walls", [])
+    if walls:
+        side = "sell" if direction == "LONG" else "buy"
+        print(f"[Whale Wall Gate] Blocked {direction} {symbol}: opposing {side} wall(s) {walls}")
+        return True
+    return False
 
 def companion_alerts(sig, df):
     """Return alert texts and state updates from latest candle; direction symmetric."""
@@ -902,6 +919,8 @@ def register_and_send(strategy_name, msg, symbol, is_margin=True, long_confirmed
         return False
     if direction == "LONG" and not long_confirmed and strategy_name.lower() != "sensi":
         print(f"[BTC filter] Blocked LONG signal for {symbol}: BTC 15m/1h middle-band confirmation failed.")
+        return False
+    if whale_wall_entry_blocked(symbol, direction, entry):
         return False
     now = datetime.now(timezone.utc)
     with tracker_lock:
