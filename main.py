@@ -12,8 +12,8 @@ from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
+TELEGRAM_BOT_TOKEN = "8947033412:AAG-Wfh8j9O5Q2BGXe3BZFJ3jdW8Ow8myVo"
+TELEGRAM_CHAT_ID = "6643451227"
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 BASE_API = "https://api.bitpin.org/api"
@@ -30,7 +30,7 @@ ESTIMATED_ROUND_TRIP_FEE = float(os.getenv(
     str(BITPIN_ENTRY_FEE_RATE + BITPIN_EXIT_FEE_RATE)))
 # P&L amount is expressed in quote currency for this many units of the asset.
 NET_PROFIT_UNITS = float(os.getenv("NET_PROFIT_UNITS", "1.0"))
-BOLLINGER_SQUEEZE_THRESHOLD = float(os.getenv("BOLLINGER_SQUEEZE_THRESHOLD", "1.75"))  # درصد؛ کمتر از این مقدار سیگنال مسدود می‌شود
+BOLLINGER_SQUEEZE_THRESHOLD = 1.75  # درصد؛ کمتر از این مقدار سیگنال مسدود می‌شود
 TRACKER_FILE = os.getenv("SIGNAL_TRACKER_FILE", "signal_tracker.json")
 
 TIMEFRAME = "15"      # تایم‌فریم ۱۵ دقیقه
@@ -38,6 +38,11 @@ TIMEFRAME = "15"      # تایم‌فریم ۱۵ دقیقه
 # فیلتر حجم استراتژی پولبک: کندل سیگنال باید حجمی >= این ضریب × vol_ma20 داشته باشد.
 # استراتژی سنسی از این قانون مستثناست (منطق «خشکی حجم» آن دست‌نخورده می‌ماند).
 PULLBACK_MIN_VOLUME_MULT = float(os.getenv("PULLBACK_MIN_VOLUME_MULT", "1.1"))
+# Block Sensi when the latest 10+ candles form a consecutive dead-volume floor.
+SENSI_DEAD_VOLUME_STREAK = 10
+SENSI_DEAD_VOLUME_RATIO = float(os.getenv("SENSI_DEAD_VOLUME_RATIO", "0.5"))
+# Sensi SHORT must be slightly above the dead-volume floor (10% buffer).
+SENSI_SHORT_DEAD_FLOOR_BUFFER = float(os.getenv("SENSI_SHORT_DEAD_FLOOR_BUFFER", "1.10"))
 
 # وضعیت سیگنال‌ها در حافظه و فایل JSON
 tracker_lock = threading.RLock()
@@ -98,7 +103,6 @@ def send_telegram(text):
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
     try:
@@ -304,8 +308,7 @@ def net_profit_at_target(entry, target, direction, units=NET_PROFIT_UNITS):
     return net_pct, net_per_unit * units
 
 def build_signal(strategy, market_code, direction, entry, order_type, stop, tp1, tp2=None, extra=None):
-    # Candle values still drive strategy/filter calculations; the emitted entry uses
-    # Bitpin's live ticker, and no candle-close fallback is allowed.
+    # Use the exchange ticker as the live entry reference.
     live_entry = fetch_bitpin_ticker_price(market_code)
     if live_entry is None:
         return None
@@ -314,55 +317,49 @@ def build_signal(strategy, market_code, direction, entry, order_type, stop, tp1,
         raise ValueError(f"Unsupported signal direction: {direction}")
     valid = (stop < entry and tp1 > entry) if direction == "LONG" else (stop > entry and tp1 < entry)
     if not valid:
-        raise ValueError(f"Invalid {direction} signal levels: require SL/TP on opposite sides of entry")
+        return None
     if tp2 is not None:
         tp2 = float(tp2)
         if (direction == "LONG" and tp2 <= entry) or (direction == "SHORT" and tp2 >= entry):
-            raise ValueError(f"Invalid {direction} TP2: must lie in the profitable direction")
-    if BITPIN_ENTRY_FEE_RATE < 0 or BITPIN_EXIT_FEE_RATE < 0:
-        raise ValueError("Bitpin fee rates cannot be negative")
+            return None
     side_emoji = "🟢" if direction == "LONG" else "🔴"
-    if str(order_type).upper() == "LIMIT":
-        entry_label = "Entry Price (planned LIMIT; fill not guaranteed)"
-        entry_note = "قیمت ورود لیمیت برنامه‌ریزی‌شده است؛ تا زمان پرشدن سفارش، قیمت اجرا قطعی نیست."
-    else:
-        entry_label = "Entry Price (signal-candle close reference)"
-        entry_note = "قیمت مرجع، کلوز آخرین کندل بررسی‌شده است؛ قیمت اجرای واقعی سفارش بازار ممکن است متفاوت باشد."
-    lines = [f"{side_emoji} <b>{direction} SIGNAL</b>",
-             f"Symbol: <code>{market_code}</code>", f"Strategy: {strategy}",
-             f"Side: {direction}", f"Entry Type: {order_type}",
-             f"💰 {entry_label}: <code>{format_price(entry)}</code>",
-             f"🎯 TP1: <code>{format_price(tp1)}</code>"]
-    net_pct, net_amount = net_profit_at_target(entry, tp1, direction)
-    lines.append(f"   Net Profit @ TP1 (after entry+exit fees): {net_pct:+.3f}% | {net_amount:+.8f} quote / {NET_PROFIT_UNITS:g} unit(s)")
+    symbol = market_code.split("_")[0]
+    strategy_label = "سنسی در کف" if "سنسی" in str(strategy).lower() else str(strategy)
+    sign = 1.0 if direction == "LONG" else -1.0
+    pct1 = sign * (tp1 - entry) / entry * 100.0
+    lines = [f"{side_emoji} {symbol} {direction}", strategy_label,
+             f". entry: {format_price(entry)}",
+             f"tp1: {format_price(tp1)} ({pct1:+.1f}%)"]
     if tp2 is not None:
-        lines.append(f"✅ TP2: <code>{format_price(tp2)}</code>")
-        net_pct2, net_amount2 = net_profit_at_target(entry, tp2, direction)
-        lines.append(f"   Net Profit @ TP2 (after entry+exit fees): {net_pct2:+.3f}% | {net_amount2:+.8f} quote / {NET_PROFIT_UNITS:g} unit(s)")
-    lines.append(f"🔴 Stop Loss: <code>{format_price(stop)}</code>")
-    lines.append(f"Fees: entry {BITPIN_ENTRY_FEE_RATE*100:.3f}% + exit {BITPIN_EXIT_FEE_RATE*100:.3f}% (Bitpin trade fees)")
-    lines.append(f"<i>{entry_note}</i>")
+        pct2 = sign * (tp2 - entry) / entry * 100.0
+        lines.append(f"tp2: {format_price(tp2)} ({pct2:+.1f}%)")
+    lines.append(f"sl: {format_price(stop)}")
     if extra:
-        lines.append(extra)
+        lines.append(str(extra))
     return "\n".join(lines)
 
-# ================= استراتژی‌ها (سنسی، روند، پولبک) =================
 def check_sensi_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
         return None
     # At the close-phase scan (150 seconds before close), evaluate the live
     # forming candle itself and compare it with the 15 candles immediately before it.
     candle = df.iloc[-1]
+    # Volume-only gate: block this strategy after a consecutive dead-volume floor.
+    # Candle body/shape does not participate in the definition of low volume.
+    if _sensi_has_dead_volume_floor(df):
+        return None
+
     window = df.iloc[-26:-1]
     support, resistance = window["low"].min(), window["high"].max()
     min_vol_15 = df.iloc[-16:-1]["volume"].min()
     if pd.isna(min_vol_15):
         return None
-    dried = candle["volume"] <= min_vol_15
+    # Volume criterion is independent of the separate price-action confirmation below.
+    low_volume = candle["volume"] <= min_vol_15
     near_support = support * 0.992 <= candle["low"] <= support * 1.003
     bullish = (candle["close"] > candle["open"] or
                candle["close"] > candle["low"] + 0.6 * (candle["high"] - candle["low"]))
-    if near_support and dried and bullish:
+    if near_support and low_volume and bullish:
         entry = float(candle["close"])
         stop = bollinger_stop(candle, "LONG")
         if stop is not None and stop < entry:
@@ -375,7 +372,14 @@ def check_sensi_strategy(df, market_code, is_margin=True):
     candle_range = float(candle["high"] - candle["low"])
     bearish = (candle["close"] < candle["open"] or
                (candle_range > 0 and candle["close"] < candle["low"] + 0.4 * candle_range))
-    if near_resistance and dried and bearish:
+    # Require the SHORT signal candle to recover modestly above the dead-volume floor.
+    # Baseline uses only the 20 candles before the current (forming) candle.
+    prior_vol_avg = df["volume"].shift(1).rolling(window=20, min_periods=20).mean().iloc[-1]
+    short_above_dead_floor = (
+        pd.notna(prior_vol_avg) and prior_vol_avg > 0
+        and candle["volume"] > SENSI_DEAD_VOLUME_RATIO * SENSI_SHORT_DEAD_FLOOR_BUFFER * prior_vol_avg
+    )
+    if near_resistance and low_volume and short_above_dead_floor and bearish:
         entry = float(candle["close"])
         stop = bollinger_stop(candle, "SHORT")
         if stop is not None and stop > entry:
@@ -388,7 +392,7 @@ def check_sensi_strategy(df, market_code, is_margin=True):
 def check_trend_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
         return None
-    candle = df.iloc[-2]
+    candle = df.iloc[-1]
     close, lower, upper = candle["close"], candle["bb_lower"], candle["bb_upper"]
     ema, rsi = candle["ema200"], candle["rsi"]
     if any(pd.isna(v) for v in (close, lower, upper, ema, rsi)):
@@ -402,7 +406,7 @@ def check_trend_strategy(df, market_code, is_margin=True):
                                 "MARKET", stop, risk_target(entry, "LONG", risk, 1.5),
                                 risk_target(entry, "LONG", risk, 2.5),
                                 f"RSI: {float(rsi):.1f}")
-    previous = df.iloc[-3]
+    previous = df.iloc[-2]
     if (close >= upper and close < ema and rsi > 65
             and _has_confirmed_selling_pressure(candle, previous)):
         entry = float(close)
@@ -418,13 +422,13 @@ def check_trend_strategy(df, market_code, is_margin=True):
 def check_pullback_strategy(df, market_code, is_margin=True):
     if df is None or len(df) < 55:
         return None
-    candle, previous = df.iloc[-2], df.iloc[-3]
+    candle, previous = df.iloc[-1], df.iloc[-2]
     close, op, low = (float(candle[k]) for k in ("close", "open", "low"))
     ema, middle, rsi = candle["ema200"], candle["bb_middle"], candle["rsi"]
     vol_ma20 = candle["vol_ma20"]
     if any(pd.isna(v) for v in (ema, middle, rsi)) or close <= 0 or ema <= 0:
         return None
-    ema_5_ago = df.iloc[-7]["ema200"]
+    ema_5_ago = df.iloc[-6]["ema200"]
     if pd.isna(ema_5_ago) or close <= ema or ema <= ema_5_ago:
         return None
     touch_zone = low <= middle * 1.01 and low >= middle * 0.97
@@ -450,15 +454,15 @@ def check_short_break_retest(df, market_code):
         return None
 
     candle = df.iloc[-2]
-    previous = df.iloc[-3]
+    previous = df.iloc[-2]
     timestamp = candle.get("timestamp", None)
     if timestamp is None:
-        timestamp = df.index[-2]
+        timestamp = df.index[-1]
     if BR_LAST_PROCESSED.get(market_code) == timestamp:
         return None
     BR_LAST_PROCESSED[market_code] = timestamp
 
-    prior_volumes = df.iloc[-22:-2]["volume"]
+    prior_volumes = df.iloc[-21:-1]["volume"]
     if len(prior_volumes) < 20:
         return None
     vol_avg = float(prior_volumes.mean())
@@ -522,7 +526,7 @@ def _structural_stop(df, candle, direction, lookback=20):
     base = bollinger_stop(candle, direction)
     if base is None:
         return None
-    recent = df.iloc[-(lookback + 2):-2] if len(df) > 2 else df.iloc[:-1]
+    recent = df.iloc[-(lookback + 1):-1] if len(df) > 2 else df.iloc[:-1]
     if recent.empty:
         return base
     atr = candle.get("atr", float("nan"))
@@ -551,7 +555,7 @@ def check_liquidity_sweep(df, market_code):
     if df is None or len(df) < 55:
         return None
     c = df.iloc[-2]
-    prior = df.iloc[-22:-2]
+    prior = df.iloc[-21:-1]
     if not _valid_candle(c) or len(prior) < 15:
         return None
     span = float(c.high - c.low)
@@ -571,7 +575,7 @@ def check_volume_divergence(df, market_code):
     if df is None or len(df) < 55:
         return None
     c = df.iloc[-2]
-    prior = df.iloc[-22:-2]
+    prior = df.iloc[-21:-1]
     if len(prior) < 15:
         return None
     ma, rsi = c.get("vol_ma20", float("nan")), c.get("rsi", float("nan"))
@@ -609,9 +613,9 @@ def check_climax_exhaustion(df, market_code):
 def check_pullback_short_strategy(df, market_code):
     if df is None or len(df) < 55:
         return None
-    c, prev = df.iloc[-2], df.iloc[-3]
+    c, prev = df.iloc[-1], df.iloc[-2]
     ema, middle, rsi, ma = c.get("ema200"), c.get("bb_middle"), c.get("rsi"), c.get("vol_ma20")
-    ema_old = df.iloc[-7].get("ema200")
+    ema_old = df.iloc[-6].get("ema200")
     if any(pd.isna(v) for v in (ema, middle, rsi, ma, ema_old)) or ma <= 0:
         return None
     touched = float(c.high) >= float(middle) * 0.97 and float(c.high) <= float(middle) * 1.03
@@ -625,13 +629,13 @@ def check_long_break_retest(df, market_code):
     """Mirror of lower-band short breakout/retest using upper-band bullish retest."""
     if df is None or len(df) < 55:
         return None
-    c, prev = df.iloc[-2], df.iloc[-3]
-    ts = c.get("timestamp", df.index[-2])
+    c, prev = df.iloc[-1], df.iloc[-2]
+    ts = c.get("timestamp", df.index[-1])
     key = (market_code, "long")
     if BR_LAST_PROCESSED.get(key) == ts:
         return None
     BR_LAST_PROCESSED[key] = ts
-    avg = float(df.iloc[-22:-2]["volume"].mean())
+    avg = float(df.iloc[-21:-1]["volume"].mean())
     if not math.isfinite(avg) or avg <= 0:
         return None
     pending = BR_PENDING_LONG.get(market_code)
@@ -762,7 +766,36 @@ def _orderbook_levels(raw_levels):
             continue
     return levels
 
-def analyze_order_book(book, direction, current_price):
+# Self-contained velocity snapshots; no external metrics module or service required.
+ORDERBOOK_VELOCITY_STATE = {}
+ORDERBOOK_WALL_COOLDOWN_SECONDS = 900
+
+def calculate_volume_velocity(df, periods=3):
+    """Current candle volume acceleration versus recent candles; returns auditable ratios."""
+    if df is None or len(df) < periods + 2 or "volume" not in df:
+        return {"current_volume": None, "baseline_volume": None, "volume_velocity": None}
+    current = float(df.iloc[-1]["volume"])
+    baseline = float(df["volume"].iloc[-(periods + 1):-1].mean())
+    return {"current_volume": current, "baseline_volume": baseline,
+            "volume_velocity": current / baseline if baseline > 0 else None}
+
+def calculate_orderbook_velocity(book, symbol, now=None):
+    """Compare depth totals with this symbol's preceding local snapshot (volumes/sec)."""
+    now = time.time() if now is None else float(now)
+    bids = _orderbook_levels(book.get("bids", [])) if isinstance(book, dict) else []
+    asks = _orderbook_levels(book.get("asks", [])) if isinstance(book, dict) else []
+    bid_total, ask_total = sum(v for _, v in bids), sum(v for _, v in asks)
+    prior = ORDERBOOK_VELOCITY_STATE.get(symbol)
+    result = {"bid_depth_velocity": None, "ask_depth_velocity": None}
+    if prior:
+        elapsed = now - prior["time"]
+        if elapsed > 0:
+            result["bid_depth_velocity"] = (bid_total-prior["bid"]) / elapsed
+            result["ask_depth_velocity"] = (ask_total-prior["ask"]) / elapsed
+    ORDERBOOK_VELOCITY_STATE[symbol] = {"time": now, "bid": bid_total, "ask": ask_total}
+    return result
+
+def analyze_order_book(book, direction, current_price, symbol=None):
     """Return adverse depth alerts and auditable depth metrics; no alert on bad inputs."""
     if not isinstance(book, dict) or direction not in ("LONG", "SHORT"):
         return [], {}
@@ -780,6 +813,8 @@ def analyze_order_book(book, direction, current_price):
     metrics = {"bid_volume": bid_volume, "ask_volume": ask_volume,
                "imbalance_ratio": bid_volume / ask_volume if ask_volume else None,
                "levels": len(bids) + len(asks)}
+    if symbol is not None:
+        metrics.update(calculate_orderbook_velocity(book, symbol))
     if not bids or not asks or total <= 0:
         return [], metrics
     alerts = []
@@ -827,6 +862,7 @@ def companion_alerts(sig, df):
     bearish = float(c.close) < float(c.open)
     bullish = float(c.close) > float(c.open)
     alerts, updates = [], {}
+    updates["volume_velocity"] = calculate_volume_velocity(df)
     tag = str(c.get("timestamp", df.index[-1]))
     if side == "LONG":
         if bearish and ratio >= 2.0 and (float(c.open)-float(c.close))/span >= 0.45:
@@ -894,7 +930,7 @@ def run_signal_tracker():
                 # Query depth once each tracker cycle (60s); deduplication below is per candle/signal.
                 book = fetch_order_book(sig["symbol"])
                 if book:
-                    ob_alerts, _ob_metrics = analyze_order_book(book, sig.get("direction"), float(df.iloc[-1].close))
+                    ob_alerts, _ob_metrics = analyze_order_book(book, sig.get("direction"), float(df.iloc[-1].close), sig["symbol"])
                     candle_tag = str(df.iloc[-1].get("timestamp", df.index[-1]))
                     alerts.extend((key, text, candle_tag) for key, text in ob_alerts)
                 changed = False
@@ -904,12 +940,19 @@ def run_signal_tracker():
                         continue
                     record.update(updates)
                     sent = record.setdefault("last_companion_alert", {})
+                    wall_present = any(key == "whale_wall" for key, _message, _tag in alerts)
+                    if not wall_present:
+                        record["wall_alert_active"] = False
                     for key, message, candle_id in alerts:
-                        # A given alert class is sent at most once per candle, with milestone alerts once per trade.
+                        # Wall alerts are sent only once while the wall remains continuously present.
+                        if key == "whale_wall" and record.get("wall_alert_active"):
+                            continue
                         if sent.get(key) == candle_id or (key in ("tp1_milestone", "trail_50", "trail_75") and sent.get(key)):
                             continue
                         sent[key] = candle_id
-                        send_telegram(f"{message}\nSymbol: <code>{sig['symbol']}</code> | Side: {sig['direction']}")
+                        if key == "whale_wall":
+                            record["wall_alert_active"] = True
+                        send_telegram(f"{message}\nSymbol: {sig['symbol']} | Side: {sig['direction']}")
                     if updates.get("status") in ("HIT_SL", "HIT_TP2"):
                         record["hit_time"] = datetime.now(timezone.utc).isoformat()
                         price = float(df.iloc[-1].close)
@@ -963,7 +1006,7 @@ def btc_long_middle_band_confirmed():
         btc_df = calculate_indicators(btc_df)
         if btc_df is None or len(btc_df) < 2:
             return False
-        closed = btc_df.iloc[-2]
+        closed = btc_df.iloc[-1]
         close = closed.get("close")
         middle = closed.get("bb_middle")
         if pd.isna(close) or pd.isna(middle) or not (float(close) > float(middle)):
@@ -973,16 +1016,15 @@ def btc_long_middle_band_confirmed():
 # ================= ثبت و ارسال سیگنال =================
 def extract_signal_details(msg):
     def num(label):
-        pattern = rf"{label}:\s*<code>([0-9]+(?:\.[0-9]+)?)</code>"
-        match = re.search(pattern, msg)
+        match = re.search(rf"(?im)^\s*{label}\s*:\s*([0-9]+(?:\.[0-9]+)?)", msg)
         return float(match.group(1)) if match else None
-    entry_match = re.search(r"Entry Price(?:[^:]*):\s*<code>([0-9]+(?:\.[0-9]+)?)</code>", msg)
-    entry = float(entry_match.group(1)) if entry_match else None
-    sl = num("Stop Loss")
-    tp1 = num("TP1") or num("Take Profit 1")
-    tp2 = num("TP2")
-    direction = "SHORT" if re.search(r"Side:\s*SHORT", msg) else "LONG"
+    entry = num(r"\.\s*entry")
+    sl = num("sl")
+    tp1 = num("tp1")
+    tp2 = num("tp2")
+    direction = "SHORT" if re.search(r"\bSHORT\b", msg, re.I) else "LONG"
     return direction, entry, sl, tp1, tp2
+
 
 def register_and_send(strategy_name, msg, symbol, is_margin=True, long_confirmed=False):
     direction, entry, sl, tp1, tp2 = extract_signal_details(msg)
@@ -1055,7 +1097,7 @@ def run_scanner():
                     if df is not None and not df.empty:
                         df_ind = calculate_indicators(df)
                         if df_ind is not None:
-                            if len(df_ind) >= 2 and pd.notna(df_ind.iloc[-2]["bandwidth"]) and df_ind.iloc[-2]["bandwidth"] < BOLLINGER_SQUEEZE_THRESHOLD:
+                            if len(df_ind) >= 2 and pd.notna(df_ind.iloc[-1]["bandwidth"]) and df_ind.iloc[-1]["bandwidth"] < BOLLINGER_SQUEEZE_THRESHOLD:
                                 time.sleep(0.3)
                                 continue
 
