@@ -113,6 +113,53 @@ def send_telegram(text):
         print(f"[Telegram Exception] {e}")
         return False
 
+# ================= دریافت قیمت لحظه‌ای تیکر از بیت‌پین =================
+def fetch_bitpin_ticker_price(market_code):
+    """Return the live Bitpin ticker price; never substitute a candle close."""
+    headers = {"User-Agent": "Mozilla/5.0"}
+    urls = [
+        f"{BASE_API}/v1/mkt/ticker/{market_code}/",
+        f"{BASE_API}/v1/mkt/tickers/",
+    ]
+
+    def extract_price(payload):
+        if isinstance(payload, list):
+            for item in payload:
+                if isinstance(item, dict) and item.get("symbol", item.get("market")) == market_code:
+                    found = extract_price(item)
+                    if found is not None:
+                        return found
+            return None
+        if not isinstance(payload, dict):
+            return None
+        for key in ("last", "last_price", "price", "close", "c", "rate"):
+            value = payload.get(key)
+            try:
+                price = float(value)
+                if math.isfinite(price) and price > 0:
+                    return price
+            except (TypeError, ValueError):
+                pass
+        for key in ("data", "output", "result", "ticker"):
+            nested = payload.get(key)
+            found = extract_price(nested)
+            if found is not None:
+                return found
+        # Some public ticker responses map market symbols directly to records.
+        return extract_price(payload.get(market_code))
+
+    for url in urls:
+        try:
+            response = requests.get(url, headers=headers, timeout=8)
+            if response.status_code == 200:
+                price = extract_price(response.json())
+                if price is not None:
+                    return price
+        except Exception as e:
+            print(f"[Bitpin Ticker] {market_code} fetch error: {e}")
+    print(f"[Bitpin Ticker] No live price available for {market_code}; signal skipped.")
+    return None
+
 # ================= دریافت کندل‌ها از بیت‌پین =================
 def fetch_bitpin_candles(market_code, resolution=TIMEFRAME, count=100):
     try:
@@ -257,7 +304,12 @@ def net_profit_at_target(entry, target, direction, units=NET_PROFIT_UNITS):
     return net_pct, net_per_unit * units
 
 def build_signal(strategy, market_code, direction, entry, order_type, stop, tp1, tp2=None, extra=None):
-    entry, stop, tp1 = float(entry), float(stop), float(tp1)
+    # Candle values still drive strategy/filter calculations; the emitted entry uses
+    # Bitpin's live ticker, and no candle-close fallback is allowed.
+    live_entry = fetch_bitpin_ticker_price(market_code)
+    if live_entry is None:
+        return None
+    entry, stop, tp1 = float(live_entry), float(stop), float(tp1)
     if direction not in ("LONG", "SHORT"):
         raise ValueError(f"Unsupported signal direction: {direction}")
     valid = (stop < entry and tp1 > entry) if direction == "LONG" else (stop > entry and tp1 < entry)
