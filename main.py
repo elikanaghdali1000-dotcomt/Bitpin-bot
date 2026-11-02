@@ -30,7 +30,7 @@ ESTIMATED_ROUND_TRIP_FEE = float(os.getenv(
     str(BITPIN_ENTRY_FEE_RATE + BITPIN_EXIT_FEE_RATE)))
 # P&L amount is expressed in quote currency for this many units of the asset.
 NET_PROFIT_UNITS = float(os.getenv("NET_PROFIT_UNITS", "1.0"))
-BOLLINGER_SQUEEZE_THRESHOLD = float(os.getenv("BOLLINGER_SQUEEZE_THRESHOLD", "1.7"))  # درصد؛ کمتر از این مقدار سیگنال مسدود می‌شود
+BOLLINGER_SQUEEZE_THRESHOLD = float(os.getenv("BOLLINGER_SQUEEZE_THRESHOLD", "1.9"))  # درصد؛ کمتر از این مقدار سیگنال مسدود می‌شود
 TRACKER_FILE = os.getenv("SIGNAL_TRACKER_FILE", "signal_tracker.json")
 
 TIMEFRAME = "15"      # تایم‌فریم ۱۵ دقیقه
