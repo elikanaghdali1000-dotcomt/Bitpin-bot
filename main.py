@@ -21,7 +21,15 @@ OHLC_URL = f"{BASE_API}/v1/mkt/candles/"  # اندپوینت رسمی بیت‌�
 
 BB_PERIOD = 20
 BB_STD = 2.0
-ESTIMATED_ROUND_TRIP_FEE = float(os.getenv("ESTIMATED_ROUND_TRIP_FEE", "0.002"))
+# Bitpin trade fee, separately charged on entry and exit (0.1% each by default).
+# Set either rate to 0.001 for 0.1%; override independently with environment variables.
+BITPIN_ENTRY_FEE_RATE = float(os.getenv("BITPIN_ENTRY_FEE_RATE", "0.001"))
+BITPIN_EXIT_FEE_RATE = float(os.getenv("BITPIN_EXIT_FEE_RATE", "0.001"))
+ESTIMATED_ROUND_TRIP_FEE = float(os.getenv(
+    "ESTIMATED_ROUND_TRIP_FEE",
+    str(BITPIN_ENTRY_FEE_RATE + BITPIN_EXIT_FEE_RATE)))
+# P&L amount is expressed in quote currency for this many units of the asset.
+NET_PROFIT_UNITS = float(os.getenv("NET_PROFIT_UNITS", "1.0"))
 BOLLINGER_SQUEEZE_THRESHOLD = float(os.getenv("BOLLINGER_SQUEEZE_THRESHOLD", "1.7"))  # درصد؛ کمتر از این مقدار سیگنال مسدود می‌شود
 TRACKER_FILE = os.getenv("SIGNAL_TRACKER_FILE", "signal_tracker.json")
 
@@ -224,11 +232,29 @@ def risk_target(entry, direction, risk, multiple=1.5):
         raise ValueError("Invalid direction or non-finite risk/entry/target multiple")
     if entry <= 0 or risk <= 0 or multiple <= 0:
         raise ValueError("Entry, risk, and target multiple must be positive")
-    fee_pad = entry * max(0.0, ESTIMATED_ROUND_TRIP_FEE)
-    target = entry + risk * multiple + fee_pad if direction == "LONG" else entry - risk * multiple - fee_pad
+    # Solve for target after both notional-based fees, so the intended gross
+    # risk multiple remains after fees (fee charged on exit target notional).
+    entry_fee = max(0.0, BITPIN_ENTRY_FEE_RATE)
+    exit_fee = max(0.0, BITPIN_EXIT_FEE_RATE)
+    desired_net_move = risk * multiple
+    if direction == "LONG":
+        target = (entry * (1.0 + entry_fee) + desired_net_move) / (1.0 - exit_fee)
+    else:
+        target = (entry * (1.0 - entry_fee) - desired_net_move) / (1.0 + exit_fee)
     if (direction == "LONG" and target <= entry) or (direction == "SHORT" and target >= entry):
         raise ValueError("Take-profit must lie beyond entry in the profitable direction")
     return target
+
+def net_profit_at_target(entry, target, direction, units=NET_PROFIT_UNITS):
+    """Return fee-adjusted P&L for a target, as percent of entry notional and quote amount."""
+    entry, target, units = float(entry), float(target), float(units)
+    if entry <= 0 or target <= 0 or units < 0 or direction not in ("LONG", "SHORT"):
+        raise ValueError("Invalid inputs for net-profit calculation")
+    gross_per_unit = target - entry if direction == "LONG" else entry - target
+    fee_per_unit = (entry * BITPIN_ENTRY_FEE_RATE) + (target * BITPIN_EXIT_FEE_RATE)
+    net_per_unit = gross_per_unit - fee_per_unit
+    net_pct = (net_per_unit / entry) * 100.0
+    return net_pct, net_per_unit * units
 
 def build_signal(strategy, market_code, direction, entry, order_type, stop, tp1, tp2=None, extra=None):
     entry, stop, tp1 = float(entry), float(stop), float(tp1)
@@ -241,15 +267,29 @@ def build_signal(strategy, market_code, direction, entry, order_type, stop, tp1,
         tp2 = float(tp2)
         if (direction == "LONG" and tp2 <= entry) or (direction == "SHORT" and tp2 >= entry):
             raise ValueError(f"Invalid {direction} TP2: must lie in the profitable direction")
+    if BITPIN_ENTRY_FEE_RATE < 0 or BITPIN_EXIT_FEE_RATE < 0:
+        raise ValueError("Bitpin fee rates cannot be negative")
     side_emoji = "🟢" if direction == "LONG" else "🔴"
+    if str(order_type).upper() == "LIMIT":
+        entry_label = "Entry Price (planned LIMIT; fill not guaranteed)"
+        entry_note = "قیمت ورود لیمیت برنامه‌ریزی‌شده است؛ تا زمان پرشدن سفارش، قیمت اجرا قطعی نیست."
+    else:
+        entry_label = "Entry Price (signal-candle close reference)"
+        entry_note = "قیمت مرجع، کلوز آخرین کندل بررسی‌شده است؛ قیمت اجرای واقعی سفارش بازار ممکن است متفاوت باشد."
     lines = [f"{side_emoji} <b>{direction} SIGNAL</b>",
              f"Symbol: <code>{market_code}</code>", f"Strategy: {strategy}",
              f"Side: {direction}", f"Entry Type: {order_type}",
-             f"💰 Entry Price: <code>{format_price(entry)}</code>",
+             f"💰 {entry_label}: <code>{format_price(entry)}</code>",
              f"🎯 TP1: <code>{format_price(tp1)}</code>"]
+    net_pct, net_amount = net_profit_at_target(entry, tp1, direction)
+    lines.append(f"   Net Profit @ TP1 (after entry+exit fees): {net_pct:+.3f}% | {net_amount:+.8f} quote / {NET_PROFIT_UNITS:g} unit(s)")
     if tp2 is not None:
         lines.append(f"✅ TP2: <code>{format_price(tp2)}</code>")
+        net_pct2, net_amount2 = net_profit_at_target(entry, tp2, direction)
+        lines.append(f"   Net Profit @ TP2 (after entry+exit fees): {net_pct2:+.3f}% | {net_amount2:+.8f} quote / {NET_PROFIT_UNITS:g} unit(s)")
     lines.append(f"🔴 Stop Loss: <code>{format_price(stop)}</code>")
+    lines.append(f"Fees: entry {BITPIN_ENTRY_FEE_RATE*100:.3f}% + exit {BITPIN_EXIT_FEE_RATE*100:.3f}% (Bitpin trade fees)")
+    lines.append(f"<i>{entry_note}</i>")
     if extra:
         lines.append(extra)
     return "\n".join(lines)
@@ -349,7 +389,7 @@ def check_pullback_strategy(df, market_code, is_margin=True):
     risk = entry - stop
     ratio = float(candle["volume"] / vol_ma20)
     return build_signal("پولبک روند صعودی", market_code, "LONG", entry, "LIMIT",
-                        stop, entry + 1.5*risk, entry + 2.5*risk,
+                        stop, risk_target(entry, "LONG", risk, 1.5), risk_target(entry, "LONG", risk, 2.5),
                         f"RSI: {float(rsi):.1f} | Volume: {ratio:.2f}x 20-candle average")
 
 def check_short_break_retest(df, market_code):
@@ -620,8 +660,6 @@ def tracker_stats():
 
 
 # ================= Order Book Watcher =================
-# Block new entries only when a nearby opposing whale wall is confirmed.
-WHALE_WALL_ENTRY_GATE_ENABLED = True
 ORDERBOOK_DEPTH_LEVELS = 15
 ORDERBOOK_IMBALANCE_MULT = 2.5
 ORDERBOOK_WHALE_DEPTH_FRACTION = 0.35
@@ -713,21 +751,6 @@ def analyze_order_book(book, direction, current_price):
     metrics["whale_walls"] = walls if "walls" in locals() else []
     metrics["total_depth"] = total
     return alerts, metrics
-
-def whale_wall_entry_blocked(symbol, direction, entry_price):
-    """Fail open if depth is unavailable; block only a nearby opposing whale wall."""
-    if not WHALE_WALL_ENTRY_GATE_ENABLED:
-        return False
-    book = fetch_order_book(symbol)
-    if not book:
-        return False
-    alerts, metrics = analyze_order_book(book, direction, entry_price)
-    walls = metrics.get("whale_walls", [])
-    if walls:
-        side = "sell" if direction == "LONG" else "buy"
-        print(f"[Whale Wall Gate] Blocked {direction} {symbol}: opposing {side} wall(s) {walls}")
-        return True
-    return False
 
 def companion_alerts(sig, df):
     """Return alert texts and state updates from latest candle; direction symmetric."""
@@ -901,7 +924,8 @@ def extract_signal_details(msg):
         pattern = rf"{label}:\s*<code>([0-9]+(?:\.[0-9]+)?)</code>"
         match = re.search(pattern, msg)
         return float(match.group(1)) if match else None
-    entry = num("Entry Price")
+    entry_match = re.search(r"Entry Price(?:[^:]*):\s*<code>([0-9]+(?:\.[0-9]+)?)</code>", msg)
+    entry = float(entry_match.group(1)) if entry_match else None
     sl = num("Stop Loss")
     tp1 = num("TP1") or num("Take Profit 1")
     tp2 = num("TP2")
@@ -919,8 +943,6 @@ def register_and_send(strategy_name, msg, symbol, is_margin=True, long_confirmed
         return False
     if direction == "LONG" and not long_confirmed and strategy_name.lower() != "sensi":
         print(f"[BTC filter] Blocked LONG signal for {symbol}: BTC 15m/1h middle-band confirmation failed.")
-        return False
-    if whale_wall_entry_blocked(symbol, direction, entry):
         return False
     now = datetime.now(timezone.utc)
     with tracker_lock:
