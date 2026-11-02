@@ -21,10 +21,10 @@ OHLC_URL = f"{BASE_API}/v1/mkt/candles/"  # اندپوینت رسمی بیت‌�
 
 BB_PERIOD = 20
 BB_STD = 2.0
+ESTIMATED_ROUND_TRIP_FEE = float(os.getenv("ESTIMATED_ROUND_TRIP_FEE", "0.002"))
 BOLLINGER_SQUEEZE_THRESHOLD = float(os.getenv("BOLLINGER_SQUEEZE_THRESHOLD", "1.7"))  # درصد؛ کمتر از این مقدار سیگنال مسدود می‌شود
 TRACKER_FILE = os.getenv("SIGNAL_TRACKER_FILE", "signal_tracker.json")
 
-CHECK_INTERVAL = 60   # هر ۱ دقیقه چک می‌کند
 TIMEFRAME = "15"      # تایم‌فریم ۱۵ دقیقه
 
 # فیلتر حجم استراتژی پولبک: کندل سیگنال باید حجمی >= این ضریب × vol_ma20 داشته باشد.
@@ -214,7 +214,7 @@ def bollinger_stop(candle, direction):
     band = candle.get(band_key, float("nan"))
     if pd.isna(band) or float(band) <= 0:
         return None
-    buffer = 0.10 * float(atr)
+    buffer = 0.20 * float(atr)
     return float(band) - buffer if direction == "LONG" else float(band) + buffer
 
 def risk_target(entry, direction, risk, multiple=1.5):
@@ -224,7 +224,8 @@ def risk_target(entry, direction, risk, multiple=1.5):
         raise ValueError("Invalid direction or non-finite risk/entry/target multiple")
     if entry <= 0 or risk <= 0 or multiple <= 0:
         raise ValueError("Entry, risk, and target multiple must be positive")
-    target = entry + risk * multiple if direction == "LONG" else entry - risk * multiple
+    fee_pad = entry * max(0.0, ESTIMATED_ROUND_TRIP_FEE)
+    target = entry + risk * multiple + fee_pad if direction == "LONG" else entry - risk * multiple - fee_pad
     if (direction == "LONG" and target <= entry) or (direction == "SHORT" and target >= entry):
         raise ValueError("Take-profit must lie beyond entry in the profitable direction")
     return target
@@ -318,6 +319,7 @@ def check_trend_strategy(df, market_code, is_margin=True):
             risk = stop - entry
             return build_signal("بازگشت روند بولینگر", market_code, "SHORT", entry,
                                 "MARKET", stop, risk_target(entry, "SHORT", risk, 1.5),
+                                risk_target(entry, "SHORT", risk, 2.5),
                                 extra=f"RSI: {float(rsi):.1f}")
     return None
 
@@ -325,8 +327,8 @@ def check_pullback_strategy(df, market_code, is_margin=True):
     if df is None or len(df) < 55:
         return None
     candle, previous = df.iloc[-2], df.iloc[-3]
-    close, op, high, low = (float(candle[k]) for k in ("close", "open", "high", "low"))
-    ema, middle, rsi, atr = candle["ema200"], candle["bb_middle"], candle["rsi"], candle["atr"]
+    close, op, low = (float(candle[k]) for k in ("close", "open", "low"))
+    ema, middle, rsi = candle["ema200"], candle["bb_middle"], candle["rsi"]
     vol_ma20 = candle["vol_ma20"]
     if any(pd.isna(v) for v in (ema, middle, rsi)) or close <= 0 or ema <= 0:
         return None
@@ -339,8 +341,6 @@ def check_pullback_strategy(df, market_code, is_margin=True):
         return None
     if pd.isna(vol_ma20) or vol_ma20 <= 0 or candle["volume"] < PULLBACK_MIN_VOLUME_MULT * vol_ma20:
         return None
-    if pd.isna(atr) or atr <= 0:
-        atr = close * 0.01
     # Prefer a resting bid at the BB middle; never suggest a buy above the signal close.
     entry = min(close, float(middle))
     stop = bollinger_stop(candle, "LONG")
@@ -376,7 +376,6 @@ def check_short_break_retest(df, market_code):
     pending = BR_PENDING_SHORT.get(market_code)
     if pending:
         pending["candles_waited"] += 1
-        pending["swing_high"] = max(pending["swing_high"], float(candle["high"]))
         level = pending["level"]
         tol = level * BR_RETEST_TOLERANCE_PCT
         failed = candle["close"] > level * (1 + BR_RETEST_TOLERANCE_PCT)
@@ -396,17 +395,14 @@ def check_short_break_retest(df, market_code):
             )
             if rejection:
                 entry = float(candle["close"])
-                atr = candle.get("atr", float("nan"))
-                if pd.isna(atr) or atr <= 0:
-                    atr = entry * 0.01
                 stop = bollinger_stop(candle, "SHORT")
                 risk = stop - entry if stop is not None else -1
                 BR_PENDING_SHORT.pop(market_code, None)
                 if risk <= 0:
                     return None
                 return build_signal("شکست و بازآزمایی باند پایینی بولینگر", market_code, "SHORT", entry,
-                                    "LIMIT", stop, risk_target(entry, "SHORT", risk, 1.0),
-                                    risk_target(entry, "SHORT", risk, 2.0),
+                                    "LIMIT", stop, risk_target(entry, "SHORT", risk, 1.5),
+                                    risk_target(entry, "SHORT", risk, 2.5),
                                     f"Breakout Level: {format_price(level)}")
 
     if pending is None:
@@ -420,9 +416,153 @@ def check_short_break_retest(df, market_code):
                 and (candle["close"] - candle["low"]) / span <= 0.35):
             BR_PENDING_SHORT[market_code] = {
                 "level": float(lower), "candles_waited": 0,
-                "swing_high": float("-inf"),
             }
     return None
+
+
+
+# ================= استراتژی‌های Elite با تقارن LONG/SHORT =================
+def _valid_candle(c):
+    return all(pd.notna(c.get(k)) for k in ("open", "high", "low", "close", "volume")) and float(c["high"]) > float(c["low"])
+
+def _structural_stop(df, candle, direction, lookback=20):
+    """Use the more protective of nearby structure and Bollinger edge, with ATR buffer."""
+    base = bollinger_stop(candle, direction)
+    if base is None:
+        return None
+    recent = df.iloc[-(lookback + 2):-2] if len(df) > 2 else df.iloc[:-1]
+    if recent.empty:
+        return base
+    atr = candle.get("atr", float("nan"))
+    atr = float(atr) if pd.notna(atr) and float(atr) > 0 else float(candle["close"]) * 0.005
+    pad = 0.20 * atr
+    swing = float(recent["low"].min()) if direction == "LONG" else float(recent["high"].max())
+    structural = swing - pad if direction == "LONG" else swing + pad
+    # Select nearest valid protective boundary to avoid unnecessarily wide stops.
+    entry = float(candle["close"])
+    candidates = [x for x in (base, structural) if (x < entry if direction == "LONG" else x > entry)]
+    if not candidates:
+        return None
+    return max(candidates) if direction == "LONG" else min(candidates)
+
+def _signal_from_candle(df, candle, market_code, direction, strategy, order_type="MARKET", extra=None):
+    entry = float(candle["close"])
+    stop = _structural_stop(df, candle, direction)
+    if stop is None or (stop >= entry if direction == "LONG" else stop <= entry):
+        return None
+    risk = abs(entry - stop)
+    return build_signal(strategy, market_code, direction, entry, order_type, stop,
+                        risk_target(entry, direction, risk, 1.5),
+                        risk_target(entry, direction, risk, 2.5), extra)
+
+def check_liquidity_sweep(df, market_code):
+    if df is None or len(df) < 55:
+        return None
+    c = df.iloc[-2]
+    prior = df.iloc[-22:-2]
+    if not _valid_candle(c) or len(prior) < 15:
+        return None
+    span = float(c.high - c.low)
+    lower_wick = min(float(c.open), float(c.close)) - float(c.low)
+    upper_wick = float(c.high) - max(float(c.open), float(c.close))
+    ma = c.get("vol_ma20", float("nan"))
+    if pd.isna(ma) or ma <= 0 or float(c.volume) < 1.2 * float(ma):
+        return None
+    swing_low, swing_high = float(prior.low.min()), float(prior.high.max())
+    if float(c.low) < swing_low and float(c.close) > swing_low and lower_wick / span >= 0.40:
+        return _signal_from_candle(df, c, market_code, "LONG", "شکار نقدینگی و رد قیمت")
+    if float(c.high) > swing_high and float(c.close) < swing_high and upper_wick / span >= 0.40:
+        return _signal_from_candle(df, c, market_code, "SHORT", "شکار نقدینگی و رد قیمت")
+    return None
+
+def check_volume_divergence(df, market_code):
+    if df is None or len(df) < 55:
+        return None
+    c = df.iloc[-2]
+    prior = df.iloc[-22:-2]
+    if len(prior) < 15:
+        return None
+    ma, rsi = c.get("vol_ma20", float("nan")), c.get("rsi", float("nan"))
+    if pd.isna(ma) or ma <= 0 or pd.isna(rsi):
+        return None
+    old_high, old_low = float(prior.high.max()), float(prior.low.min())
+    old_vol = float(prior.volume.max())
+    # New swing extreme on at least 0.1% extension, with materially lower participation.
+    if float(c.high) > old_high * 1.001 and float(c.volume) < 0.70 * old_vol and rsi >= 60:
+        return _signal_from_candle(df, c, market_code, "SHORT", "واگرایی حجم و فرسودگی سقف")
+    if float(c.low) < old_low * 0.999 and float(c.volume) < 0.70 * old_vol and rsi <= 40:
+        return _signal_from_candle(df, c, market_code, "LONG", "واگرایی حجم و فرسودگی کف")
+    return None
+
+def check_climax_exhaustion(df, market_code):
+    if df is None or len(df) < 55:
+        return None
+    c = df.iloc[-2]
+    if not _valid_candle(c):
+        return None
+    ma = c.get("vol_ma20", float("nan"))
+    if pd.isna(ma) or ma <= 0 or float(c.volume) < 2.5 * float(ma):
+        return None
+    span = float(c.high - c.low)
+    upper_wick = float(c.high) - max(float(c.open), float(c.close))
+    lower_wick = min(float(c.open), float(c.close)) - float(c.low)
+    at_upper = pd.notna(c.get("bb_upper")) and float(c.high) >= float(c.bb_upper)
+    at_lower = pd.notna(c.get("bb_lower")) and float(c.low) <= float(c.bb_lower)
+    if at_upper and upper_wick / span >= 0.35 and float(c.close) < float(c.high) - 0.4 * span:
+        return _signal_from_candle(df, c, market_code, "SHORT", "حجم اوج و فرسودگی صعودی")
+    if at_lower and lower_wick / span >= 0.35 and float(c.close) > float(c.low) + 0.4 * span:
+        return _signal_from_candle(df, c, market_code, "LONG", "حجم اوج و فرسودگی نزولی")
+    return None
+
+def check_pullback_short_strategy(df, market_code):
+    if df is None or len(df) < 55:
+        return None
+    c, prev = df.iloc[-2], df.iloc[-3]
+    ema, middle, rsi, ma = c.get("ema200"), c.get("bb_middle"), c.get("rsi"), c.get("vol_ma20")
+    ema_old = df.iloc[-7].get("ema200")
+    if any(pd.isna(v) for v in (ema, middle, rsi, ma, ema_old)) or ma <= 0:
+        return None
+    touched = float(c.high) >= float(middle) * 0.97 and float(c.high) <= float(middle) * 1.03
+    rejection = float(c.close) < float(c.open) and float(c.close) < float(middle) and float(prev.close) >= float(prev.bb_middle) * 0.99
+    if float(c.close) < float(ema) and float(ema) < float(ema_old) and touched and rejection and 40 <= float(rsi) <= 65 and float(c.volume) >= PULLBACK_MIN_VOLUME_MULT * float(ma):
+        return _signal_from_candle(df, c, market_code, "SHORT", "پولبک روند نزولی")
+    return None
+
+BR_PENDING_LONG = {}
+def check_long_break_retest(df, market_code):
+    """Mirror of lower-band short breakout/retest using upper-band bullish retest."""
+    if df is None or len(df) < 55:
+        return None
+    c, prev = df.iloc[-2], df.iloc[-3]
+    ts = c.get("timestamp", df.index[-2])
+    key = (market_code, "long")
+    if BR_LAST_PROCESSED.get(key) == ts:
+        return None
+    BR_LAST_PROCESSED[key] = ts
+    avg = float(df.iloc[-22:-2]["volume"].mean())
+    if not math.isfinite(avg) or avg <= 0:
+        return None
+    pending = BR_PENDING_LONG.get(market_code)
+    if pending:
+        pending["candles_waited"] += 1
+        level = pending["level"]
+        if c.close < level * (1 - BR_RETEST_TOLERANCE_PCT) or pending["candles_waited"] > BR_MAX_RETEST_CANDLES:
+            BR_PENDING_LONG.pop(market_code, None); pending = None
+        else:
+            span = float(c.high - c.low)
+            body = abs(float(c.close-c.open))/span if span > 0 else 0
+            touched = c.low <= level * (1 + BR_RETEST_TOLERANCE_PCT) and c.high >= level * (1 - BR_RETEST_TOLERANCE_PCT)
+            if touched and c.close > c.open and c.close > level and c.volume > avg and c.volume > prev.volume and body >= BR_MIN_REJECTION_BODY_RATIO and (c.close-c.low)/span >= 0.55:
+                BR_PENDING_LONG.pop(market_code, None)
+                return _signal_from_candle(df, c, market_code, "LONG", "شکست و بازآزمایی باند بالایی بولینگر", "LIMIT", f"Breakout Level: {format_price(level)}")
+    if pending is None:
+        span = float(c.high-c.low)
+        body = abs(float(c.close-c.open))/span if span > 0 else 0
+        upper = c.get("bb_upper", float("nan"))
+        if pd.notna(upper) and span > 0 and c.volume > BR_BREAKOUT_VOL_MULT*avg and body >= BR_MIN_BREAKOUT_BODY_RATIO and c.close > upper and c.close > c.open and (c.close-c.low)/span >= 0.65:
+            BR_PENDING_LONG[market_code] = {"level": float(upper), "candles_waited": 0}
+    return None
+
 
 # ================= Signal Tracker (ذخیره و پیگیری سیگنال‌ها) =================
 def load_tracker():
@@ -444,7 +584,7 @@ def save_tracker():
         except Exception as e:
             print(f"[Tracker] Save error: {e}")
 
-def add_signal(symbol, direction, entry, sl, tp1, strategy, is_margin=True):
+def add_signal(symbol, direction, entry, sl, tp1, strategy, is_margin=True, tp2=None):
     sid = f"{symbol}_{strategy}_{uuid.uuid4().hex[:8]}"
     rec = {
         "id": sid,
@@ -453,6 +593,9 @@ def add_signal(symbol, direction, entry, sl, tp1, strategy, is_margin=True):
         "entry": entry,
         "sl": sl,
         "tp1": tp1,
+        "tp2": tp2,
+        "tp1_hit": False,
+        "last_companion_alert": {},
         "strategy": strategy,
         "is_margin": is_margin,
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -468,20 +611,170 @@ def tracker_stats():
     with tracker_lock:
         signals = list(signal_tracker.values())
     total = len(signals)
-    wins = sum(1 for item in signals if item.get("status") == "HIT_TP1")
+    wins = sum(1 for item in signals if item.get("tp1_hit") or item.get("status") == "HIT_TP1")
     losses = sum(1 for item in signals if item.get("status") == "HIT_SL")
     open_signals = sum(1 for item in signals if item.get("status") == "OPEN")
     ambiguous = sum(1 for item in signals if item.get("status") == "AMBIGUOUS")
     return total, wins, losses, open_signals, ambiguous
 
-def is_squeeze(df):
+
+
+# ================= Order Book Watcher =================
+ORDERBOOK_DEPTH_LEVELS = 15
+ORDERBOOK_IMBALANCE_MULT = 2.5
+ORDERBOOK_WHALE_DEPTH_FRACTION = 0.35
+ORDERBOOK_WHALE_AVG_MULT = 4.0
+ORDERBOOK_WALL_DISTANCE_PCT = 0.02
+
+def fetch_order_book(symbol):
+    """Fetch Bitpin depth. Prefer the user-provided /mth/ path, then /mkt/ and .ir."""
+    urls = [
+        f"{BASE_API}/v1/mth/orderbook/{symbol}/",
+        f"{BASE_API}/v1/mkt/orderbook/{symbol}/",
+        f"https://api.bitpin.ir/api/v1/mth/orderbook/{symbol}/",
+        f"https://api.bitpin.ir/api/v1/mkt/orderbook/{symbol}/",
+    ]
+    headers = {"User-Agent": "Mozilla/5.0"}
+    for url in urls:
+        try:
+            response = requests.get(url, headers=headers, timeout=5)
+            if response.status_code != 200:
+                continue
+            data = response.json()
+            if isinstance(data, dict) and isinstance(data.get("data"), dict):
+                data = data["data"]
+            if not isinstance(data, dict):
+                continue
+            orders = data.get("orders", data)
+            if isinstance(orders, dict) and ("bids" in orders or "asks" in orders):
+                return {"bids": orders.get("bids", []), "asks": orders.get("asks", [])}
+        except Exception as exc:
+            print(f"[OrderBook] Fetch failed {url}: {exc}")
+    return None
+
+def _orderbook_levels(raw_levels):
+    """Normalize public API list/dict levels into positive (price, amount) pairs."""
+    levels = []
+    if not isinstance(raw_levels, (list, tuple)):
+        return levels
+    for item in raw_levels[:ORDERBOOK_DEPTH_LEVELS]:
+        try:
+            if isinstance(item, dict):
+                price = float(item.get("price", item.get("rate")))
+                amount = float(item.get("amount", item.get("volume", item.get("quantity", item.get("qty")))))
+            else:
+                price, amount = float(item[0]), float(item[1])
+            if math.isfinite(price) and math.isfinite(amount) and price > 0 and amount > 0:
+                levels.append((price, amount))
+        except (TypeError, ValueError, IndexError):
+            continue
+    return levels
+
+def analyze_order_book(book, direction, current_price):
+    """Return adverse depth alerts and auditable depth metrics; no alert on bad inputs."""
+    if not isinstance(book, dict) or direction not in ("LONG", "SHORT"):
+        return [], {}
     try:
-        bw = df.iloc[-2]["bandwidth"]
-        if pd.isna(bw):
-            return False
-        return bw < BOLLINGER_SQUEEZE_THRESHOLD
-    except Exception:
-        return False
+        price_now = float(current_price)
+    except (TypeError, ValueError):
+        return [], {}
+    if not math.isfinite(price_now) or price_now <= 0:
+        return [], {}
+    bids = _orderbook_levels(book.get("bids", []))
+    asks = _orderbook_levels(book.get("asks", []))
+    bid_volume = sum(amount for _, amount in bids)
+    ask_volume = sum(amount for _, amount in asks)
+    total = bid_volume + ask_volume
+    metrics = {"bid_volume": bid_volume, "ask_volume": ask_volume,
+               "imbalance_ratio": bid_volume / ask_volume if ask_volume else None,
+               "levels": len(bids) + len(asks)}
+    if not bids or not asks or total <= 0:
+        return [], metrics
+    alerts = []
+    if direction == "LONG" and ask_volume >= ORDERBOOK_IMBALANCE_MULT * bid_volume:
+        alerts.append(("orderbook_imbalance", "⚠️ عدم تعادل سنگین اردربوک (فشار فروش در عمق بازار)"))
+    elif direction == "SHORT" and bid_volume >= ORDERBOOK_IMBALANCE_MULT * ask_volume:
+        alerts.append(("orderbook_imbalance", "⚠️ عدم تعادل سنگین اردربوک (فشار خرید و حمایت سنگین در عمق بازار)"))
+
+    # Whale threshold is evaluated against all returned top-depth levels.
+    all_volumes = [v for _, v in bids + asks]
+    avg_level = total / len(all_volumes) if all_volumes else 0
+    whale = lambda amount: amount >= ORDERBOOK_WHALE_DEPTH_FRACTION * total or (avg_level > 0 and amount > ORDERBOOK_WHALE_AVG_MULT * avg_level)
+    if direction == "LONG":
+        walls = [(p, v) for p, v in asks if p >= price_now and (p-price_now)/price_now <= ORDERBOOK_WALL_DISTANCE_PCT and whale(v)]
+        if walls:
+            alerts.append(("whale_wall", "🐋 دیوار فروش سنگین (Whale Sell Wall) در اردر بوک شناسایی شد!"))
+    else:
+        walls = [(p, v) for p, v in bids if p <= price_now and (price_now-p)/price_now <= ORDERBOOK_WALL_DISTANCE_PCT and whale(v)]
+        if walls:
+            alerts.append(("whale_wall", "🐋 دیوار خرید سنگین (Whale Buy Wall) در اردر بوک شناسایی شد!"))
+    metrics["whale_walls"] = walls if "walls" in locals() else []
+    metrics["total_depth"] = total
+    return alerts, metrics
+
+def companion_alerts(sig, df):
+    """Return alert texts and state updates from latest candle; direction symmetric."""
+    if df is None or df.empty:
+        return [], {}
+    c = df.iloc[-1]
+    if not _valid_candle(c):
+        return [], {}
+    side = sig.get("direction")
+    if side not in ("LONG", "SHORT"):
+        return [], {}
+    entry, tp1, sl = float(sig["entry"]), float(sig["tp1"]), float(sig["sl"])
+    tp2 = sig.get("tp2")
+    price = float(c.close)
+    volume_ma = c.get("vol_ma20", float("nan"))
+    ratio = float(c.volume) / float(volume_ma) if pd.notna(volume_ma) and float(volume_ma) > 0 else 0
+    span = float(c.high-c.low)
+    upper_wick = (float(c.high)-max(float(c.open),float(c.close)))/span if span > 0 else 0
+    lower_wick = (min(float(c.open),float(c.close))-float(c.low))/span if span > 0 else 0
+    middle = c.get("bb_middle", float("nan"))
+    upper, lower = c.get("bb_upper", float("nan")), c.get("bb_lower", float("nan"))
+    bearish = float(c.close) < float(c.open)
+    bullish = float(c.close) > float(c.open)
+    alerts, updates = [], {}
+    tag = str(c.get("timestamp", df.index[-1]))
+    if side == "LONG":
+        if bearish and ratio >= 2.0 and (float(c.open)-float(c.close))/span >= 0.45:
+            alerts.append(("volume_reversal", "🚨 <b>هشدار همراه معامله (خطر بازگشت نزولی)</b>\nحجم فروش غیرعادی و کندل نزولی مشکوک مشاهده شد. پیشنهاد: سیو سود، بستن دستی یا انتقال حد ضرر به نقطه ورود (Risk-Free)."))
+        if pd.notna(upper) and float(c.high) >= float(upper) and upper_wick >= 0.35 and ratio < 1.0:
+            alerts.append(("exhaustion", "⚠️ <b>هشدار همراه معامله (کاهش مومنتوم)</b>\nبرخورد با باند/مقاومت و سایه بالایی همراه کاهش حجم؛ پیشنهاد: سیو سود پله‌ای."))
+        if pd.notna(middle) and float(c.close) < float(middle) and ratio >= 1.0:
+            alerts.append(("structure_flip", "⚠️ شکست رو به پایین خط تعادل (میانگین متحرک). ساختار صعودی تضعیف شد."))
+        reached = float(c.high) >= tp1
+        favorable = price >= entry
+        progress = (price-entry)/(float(tp2)-entry) if tp2 and float(tp2)>entry else 0
+    else:
+        if bullish and ratio >= 2.0 and (float(c.close)-float(c.open))/span >= 0.45:
+            alerts.append(("volume_reversal", "🚨 <b>هشدار همراه معامله (خطر بازگشت صعودی)</b>\nحجم خرید غیرعادی و کندل صعودی مشکوک مشاهده شد. پیشنهاد: سیو سود، بستن دستی یا انتقال حد ضرر به نقطه ورود (Risk-Free)."))
+        if pd.notna(lower) and float(c.low) <= float(lower) and lower_wick >= 0.35 and ratio < 1.0:
+            alerts.append(("exhaustion", "⚠️ <b>هشدار همراه معامله (کاهش مومنتوم)</b>\nبرخورد با باند/حمایت و سایه پایینی همراه کاهش حجم؛ پیشنهاد: سیو سود پله‌ای."))
+        if pd.notna(middle) and float(c.close) > float(middle) and ratio >= 1.0:
+            alerts.append(("structure_flip", "⚠️ شکست رو به بالای خط تعادل (میانگین متحرک). ساختار نزولی تضعیف شد."))
+        reached = float(c.low) <= tp1
+        favorable = price <= entry
+        progress = (entry-price)/(entry-float(tp2)) if tp2 and float(tp2)<entry else 0
+    if reached and not sig.get("tp1_hit"):
+        updates["tp1_hit"] = True
+        alerts.append(("tp1_milestone", f"✅ <b>هدف TP1 لمس شد</b>\nپیشنهاد همراه: بستن ۵۰٪ موقعیت و انتقال حد ضرر به نقطه ورود (Risk-Free) = <code>{format_price(entry)}</code>."))
+    if favorable and progress >= 0.50 and not sig.get("trail_50"):
+        updates["trail_50"] = True
+        trail = entry + (float(tp2)-entry)*0.20 if side == "LONG" else entry - (entry-float(tp2))*0.20
+        alerts.append(("trail_50", f"📈 قیمت در مسیر TP2 است؛ حدضرر متحرک پیشنهادی: <code>{format_price(trail)}</code> (پیشرفت ۵۰٪)."))
+    if favorable and progress >= 0.75 and not sig.get("trail_75"):
+        updates["trail_75"] = True
+        trail = entry + (float(tp2)-entry)*0.45 if side == "LONG" else entry - (entry-float(tp2))*0.45
+        alerts.append(("trail_75", f"📈 پیشرفت ۷۵٪ به‌سوی TP2؛ حدضرر متحرک پیشنهادی: <code>{format_price(trail)}</code>."))
+    # At TP2, close out tracking; SL still monitored until this point.
+    if tp2 and (float(c.high) >= float(tp2) if side == "LONG" else float(c.low) <= float(tp2)):
+        updates["status"] = "HIT_TP2"
+    elif (float(c.low) <= sl if side == "LONG" else float(c.high) >= sl):
+        updates["status"] = "HIT_SL"
+    updates["last_candle"] = tag
+    return [(key, text, tag) for key, text in alerts], updates
+
 
 # ================= حلقه پس‌زمینه رهگیری سیگنال‌ها =================
 def check_hit(symbol, direction, tp1, sl, candle_high, candle_low):
@@ -499,38 +792,40 @@ def run_signal_tracker():
         try:
             time.sleep(60)
             with tracker_lock:
-                open_signals = {k: v for k, v in signal_tracker.items() if v.get("status") == "OPEN"}
+                open_signals = {k: v.copy() for k, v in signal_tracker.items() if v.get("status") == "OPEN"}
             for sid, sig in open_signals.items():
-                df = fetch_bitpin_candles(sig["symbol"], resolution=TIMEFRAME, count=2)
+                df = fetch_bitpin_candles(sig["symbol"], resolution=TIMEFRAME, count=60)
+                df = calculate_indicators(df)
                 if df is None or df.empty:
                     continue
-                last_candle = df.iloc[-1]
-                current_price = float(last_candle["close"])
-                candle_high = float(last_candle["high"])
-                candle_low = float(last_candle["low"])
-                if current_price <= 0:
-                    continue
-                hit_tp, hit_sl = check_hit(sig["symbol"], sig["direction"], sig["tp1"], sig["sl"], candle_high, candle_low)
-                if hit_tp and hit_sl:
-                    status = "AMBIGUOUS"
-                elif hit_tp:
-                    status = "HIT_TP1"
-                elif hit_sl:
-                    status = "HIT_SL"
-                else:
-                    continue
+                alerts, updates = companion_alerts(sig, df)
+                # Query depth once each tracker cycle (60s); deduplication below is per candle/signal.
+                book = fetch_order_book(sig["symbol"])
+                if book:
+                    ob_alerts, _ob_metrics = analyze_order_book(book, sig.get("direction"), float(df.iloc[-1].close))
+                    candle_tag = str(df.iloc[-1].get("timestamp", df.index[-1]))
+                    alerts.extend((key, text, candle_tag) for key, text in ob_alerts)
+                changed = False
                 with tracker_lock:
-                    signal_tracker[sid]["status"] = status
-                    signal_tracker[sid]["hit_time"] = datetime.now(timezone.utc).isoformat()
-                save_tracker()
-                emoji = "✅" if status == "HIT_TP1" else ("❌" if status == "HIT_SL" else "⚠️")
-                pos = "LONG" if sig["direction"] == "LONG" else "SHORT"
-                status_text = status.replace("HIT_TP1", "HIT TP1").replace("HIT_SL", "HIT SL")
-                send_telegram(f"{emoji} <b>{status_text}</b>\nSymbol: <code>{sig['symbol']}</code>\n"
-                              f"Strategy: {sig['strategy']}\nSide: {pos}\nCurrent Price:\n"
-                              f"<code>{format_price(current_price)}</code>\nTake Profit 1:\n"
-                              f"<code>{format_price(sig['tp1'])}</code>\nStop Loss:\n"
-                              f"<code>{format_price(sig['sl'])}</code>")
+                    record = signal_tracker.get(sid)
+                    if not record or record.get("status") != "OPEN":
+                        continue
+                    record.update(updates)
+                    sent = record.setdefault("last_companion_alert", {})
+                    for key, message, candle_id in alerts:
+                        # A given alert class is sent at most once per candle, with milestone alerts once per trade.
+                        if sent.get(key) == candle_id or (key in ("tp1_milestone", "trail_50", "trail_75") and sent.get(key)):
+                            continue
+                        sent[key] = candle_id
+                        send_telegram(f"{message}\nSymbol: <code>{sig['symbol']}</code> | Side: {sig['direction']}")
+                    if updates.get("status") in ("HIT_SL", "HIT_TP2"):
+                        record["hit_time"] = datetime.now(timezone.utc).isoformat()
+                        price = float(df.iloc[-1].close)
+                        label = "HIT TP2" if updates["status"] == "HIT_TP2" else "HIT SL"
+                        send_telegram(f"{'✅' if label == 'HIT TP2' else '❌'} <b>{label}</b>\nSymbol: <code>{sig['symbol']}</code>\nSide: {sig['direction']}\nCurrent Price: <code>{format_price(price)}</code>")
+                    changed = True
+                if changed:
+                    save_tracker()
         except Exception as e:
             print(f"[Tracker Loop Error] {e}")
 
@@ -592,11 +887,12 @@ def extract_signal_details(msg):
     entry = num("Entry Price")
     sl = num("Stop Loss")
     tp1 = num("TP1") or num("Take Profit 1")
+    tp2 = num("TP2")
     direction = "SHORT" if re.search(r"Side:\s*SHORT", msg) else "LONG"
-    return direction, entry, sl, tp1
+    return direction, entry, sl, tp1, tp2
 
 def register_and_send(strategy_name, msg, symbol, is_margin=True, long_confirmed=False):
-    direction, entry, sl, tp1 = extract_signal_details(msg)
+    direction, entry, sl, tp1, tp2 = extract_signal_details(msg)
     if entry is None or sl is None or tp1 is None:
         print(f"[Signal] Rejected malformed signal for {symbol} ({strategy_name}).")
         return False
@@ -626,7 +922,7 @@ def register_and_send(strategy_name, msg, symbol, is_margin=True, long_confirmed
                     pass
     if not send_telegram(msg):
         return False
-    add_signal(symbol, direction, entry, sl, tp1, strategy_name, is_margin)
+    add_signal(symbol, direction, entry, sl, tp1, strategy_name, is_margin, tp2)
     return True
 
 def run_scanner():
@@ -676,6 +972,19 @@ def run_scanner():
                                     register_and_send("break_retest_short", break_retest_res, symbol, is_margin=True, long_confirmed=btc_long_confirmed)
 
                             if scan_phase == "close":
+                                elite_checks = (check_long_break_retest, check_liquidity_sweep,
+                                                check_volume_divergence, check_climax_exhaustion,
+                                                check_pullback_short_strategy)
+                                for strategy_fn in elite_checks:
+                                    elite_msg = strategy_fn(df_ind, symbol)
+                                    if elite_msg:
+                                        # Strategy key remains stable for duplicate prevention.
+                                        strategy_key = {check_long_break_retest: "break_retest_long",
+                                            check_liquidity_sweep: "liquidity_sweep",
+                                            check_volume_divergence: "volume_divergence",
+                                            check_climax_exhaustion: "climax_exhaustion",
+                                            check_pullback_short_strategy: "pullback_short"}[strategy_fn]
+                                        register_and_send(strategy_key, elite_msg, symbol, is_margin=True, long_confirmed=btc_long_confirmed)
                                 sensi_res = check_sensi_strategy(df_ind, symbol, is_margin=True)
                                 if sensi_res:
                                     register_and_send("sensi", sensi_res, symbol, is_margin=True, long_confirmed=btc_long_confirmed)
@@ -687,6 +996,9 @@ def run_scanner():
                                 pullback_res = check_pullback_strategy(df_ind, symbol, is_margin=True)
                                 if pullback_res:
                                     register_and_send("pullback", pullback_res, symbol, is_margin=True, long_confirmed=btc_long_confirmed)
+                                pullback_short_res = check_pullback_short_strategy(df_ind, symbol)
+                                if pullback_short_res:
+                                    register_and_send("pullback_short", pullback_short_res, symbol, is_margin=True, long_confirmed=btc_long_confirmed)
 
                     time.sleep(0.3)
 
