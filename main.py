@@ -177,7 +177,7 @@ def compare_binance_bitpin_price(market_code, bitpin_price=None, binance_symbol=
         bitpin = float(bitpin_price) if bitpin_price is not None else fetch_bitpin_ticker_price(market_code)
         if bitpin is None or not math.isfinite(bitpin) or bitpin <= 0:
             return False, None, None, None
-        response = requests.get(f"{BINANCE_FAPI}/fapi/v1/ticker/price",
+        response = requests.get("https://api.binance.com/api/v3/ticker/price",
                                 params={"symbol": binance_symbol}, timeout=8)
         response.raise_for_status()
         payload = response.json()
