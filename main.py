@@ -17,6 +17,8 @@ TELEGRAM_CHAT_ID = "6643451227"
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 BASE_API = "https://api.bitpin.org/api"
+BINANCE_FAPI = "https://fapi.binance.com"
+PRICE_CHECK_TOLERANCE_PCT = float(os.getenv("PRICE_CHECK_TOLERANCE_PCT", "1.0"))
 OHLC_URL = f"{BASE_API}/v1/mkt/candles/"  # اندپوینت رسمی بیت‌پین
 
 BB_PERIOD = 20
@@ -163,6 +165,34 @@ def fetch_bitpin_ticker_price(market_code):
             print(f"[Bitpin Ticker] {market_code} fetch error: {e}")
     print(f"[Bitpin Ticker] No live price available for {market_code}; signal skipped.")
     return None
+
+
+def compare_binance_bitpin_price(market_code, bitpin_price=None, binance_symbol=None):
+    """Compare live Binance USD-M futures and Bitpin prices; fail closed if unavailable."""
+    market_code = str(market_code).upper()
+    if not binance_symbol:
+        base = market_code[:-5] if market_code.endswith("_USDT") else market_code.replace("_", "")
+        binance_symbol = base + "USDT"
+    try:
+        bitpin = float(bitpin_price) if bitpin_price is not None else fetch_bitpin_ticker_price(market_code)
+        if bitpin is None or not math.isfinite(bitpin) or bitpin <= 0:
+            return False, None, None, None
+        response = requests.get(f"{BINANCE_FAPI}/fapi/v1/ticker/price",
+                                params={"symbol": binance_symbol}, timeout=8)
+        response.raise_for_status()
+        payload = response.json()
+        binance = float(payload.get("price"))
+        if not math.isfinite(binance) or binance <= 0:
+            raise ValueError("Invalid Binance ticker price")
+        difference_pct = abs(bitpin - binance) / binance * 100.0
+        passed = difference_pct <= PRICE_CHECK_TOLERANCE_PCT
+        if not passed:
+            print(f"[Price Check] {market_code} blocked: Bitpin={bitpin}, Binance={binance}, "
+                  f"difference={difference_pct:.4f}% > {PRICE_CHECK_TOLERANCE_PCT:.2f}%")
+        return passed, bitpin, binance, difference_pct
+    except Exception as exc:
+        print(f"[Price Check] {market_code} comparison failed; signal blocked: {exc}")
+        return False, None, None, None
 
 # ================= دریافت کندل‌ها از بیت‌پین =================
 def fetch_bitpin_candles(market_code, resolution=TIMEFRAME, count=100):
@@ -311,6 +341,10 @@ def build_signal(strategy, market_code, direction, entry, order_type, stop, tp1,
     # Use the exchange ticker as the live entry reference.
     live_entry = fetch_bitpin_ticker_price(market_code)
     if live_entry is None:
+        return None
+    price_ok, bitpin_price, binance_price, price_diff = compare_binance_bitpin_price(
+        market_code, bitpin_price=live_entry)
+    if not price_ok:
         return None
     entry, stop, tp1 = float(live_entry), float(stop), float(tp1)
     if direction not in ("LONG", "SHORT"):
@@ -949,6 +983,11 @@ def scan_eli_whale_once(symbols=None):
             continue
         # Rising OI plus a large taker-agnostic volume impulse; direction follows 5m price action.
         direction = "LONG" if price_change >= 0 else "SHORT"
+        market_code = symbol[:-4] + "_USDT" if symbol.endswith("USDT") else symbol
+        price_ok, bitpin_price, binance_price, price_diff = compare_binance_bitpin_price(
+            market_code, binance_symbol=symbol)
+        if not price_ok:
+            continue
         candle_tag = int(time.time() // max(60, ELI_WHALE_INTERVAL))
         dedup_key = (symbol, direction)
         with ELI_LOCK:
@@ -963,6 +1002,8 @@ def scan_eli_whale_once(symbols=None):
             f"5m quote volume: {format_compact_number(quote_vol)} USDT "
             f"({vol_mult:.2f}x prior-20 avg)\n"
             f"5m price change: {price_change:+.2f}%\n"
+            f"Price check: Binance {format_compact_number(binance_price)} | Bitpin {format_compact_number(bitpin_price)} | "
+            f"difference {price_diff:.3f}% (max {PRICE_CHECK_TOLERANCE_PCT:.1f}%)\n"
             "نوع: ردیاب مستقل OI و ورود حجم؛ این پیام سیگنال بیت‌پین/سفارش معاملاتی نیست."
         )
         send_telegram(message)
