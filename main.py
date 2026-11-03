@@ -896,10 +896,48 @@ ELI_MIN_5M_QUOTE_VOLUME = float(os.getenv("ELI_MIN_5M_QUOTE_VOLUME", "1000000"))
 ELI_STATE = {"oi": {}, "last_alert": {}, "last_global_oi": None}
 ELI_LOCK = threading.Lock()
 
+# Public USD-M Futures API mirrors; request fallback is isolated from all strategy logic.
+BINANCE_FAPI_ENDPOINTS = [
+    BINANCE_FAPI,
+    "https://fapi1.binance.com",
+    "https://fapi2.binance.com",
+    "https://fapi3.binance.com",
+    "https://fapi4.binance.com",
+]
+BINANCE_USER_AGENT = "Mozilla/5.0 (compatible; BitpinTradingBot/1.0)"
+
+
 def _binance_get(path, params=None, timeout=12):
-    response = requests.get(BINANCE_FAPI + path, params=params or {}, timeout=timeout)
-    response.raise_for_status()
-    return response.json()
+    """GET USD-M Futures data with a User-Agent and failover across Binance hosts."""
+    headers = {"User-Agent": BINANCE_USER_AGENT, "Accept": "application/json"}
+    failures = []
+    for base_url in BINANCE_FAPI_ENDPOINTS:
+        try:
+            response = requests.get(base_url + path, params=params or {},
+                                    headers=headers, timeout=timeout)
+            response.raise_for_status()
+            return response.json()
+        except Exception as exc:
+            failures.append(f"{base_url}: {exc}")
+    raise RuntimeError("All Binance Futures endpoints failed: " + " | ".join(failures))
+
+
+BINANCE_HEALTH_INTERVAL = max(60, int(os.getenv("BINANCE_HEALTH_INTERVAL", "3600")))
+
+
+def run_binance_health_check():
+    """Periodically ping Binance Futures and report connectivity to Telegram and logs."""
+    while True:
+        checked_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+        try:
+            _binance_get("/fapi/v1/ping", timeout=8)
+            message = f"✅ سلامت اتصال Binance Futures: برقرار است\nزمان: {checked_at}"
+            print(f"[Binance Health] OK at {checked_at}")
+        except Exception as exc:
+            message = f"❌ سلامت اتصال Binance Futures: ناموفق\nزمان: {checked_at}\nخطا: {exc}"
+            print(f"[Binance Health] FAILED at {checked_at}: {exc}")
+        send_telegram(message)
+        time.sleep(BINANCE_HEALTH_INTERVAL)
 
 def fetch_binance_futures_universe(limit=ELI_WHALE_UNIVERSE_SIZE):
     """USDT-margined perpetuals with highest 24h quote turnover."""
@@ -1225,5 +1263,8 @@ if __name__ == "__main__":
 
     eli_whale_thread = threading.Thread(target=run_eli_whale_tracker, daemon=True)
     eli_whale_thread.start()
+
+    binance_health_thread = threading.Thread(target=run_binance_health_check, daemon=True)
+    binance_health_thread.start()
 
     run_scanner()
