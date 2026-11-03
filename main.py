@@ -334,9 +334,24 @@ def build_signal(strategy, market_code, direction, entry, order_type, stop, tp1,
         pct2 = sign * (tp2 - entry) / entry * 100.0
         lines.append(f"tp2: {format_price(tp2)} ({pct2:+.1f}%)")
     lines.append(f"sl: {format_price(stop)}")
+    net1_pct, net1_amount = net_profit_at_target(entry, tp1, direction, NET_PROFIT_UNITS)
+    lines.append(f"سود خالص TP1 (برای {NET_PROFIT_UNITS:g} واحد): {net1_pct:+.2f}% | {net1_amount:+.6f} USDT")
+    if tp2 is not None:
+        net2_pct, net2_amount = net_profit_at_target(entry, tp2, direction, NET_PROFIT_UNITS)
+        lines.append(f"سود خالص TP2 (برای {NET_PROFIT_UNITS:g} واحد): {net2_pct:+.2f}% | {net2_amount:+.6f} USDT")
     if extra:
         lines.append(str(extra))
     return "\n".join(lines)
+
+def _sensi_has_dead_volume_floor(df):
+    """Block Sensi after N consecutive candles with volume below a fraction of baseline."""
+    if df is None or len(df) < SENSI_DEAD_VOLUME_STREAK + 20:
+        return False
+    vols = pd.to_numeric(df["volume"], errors="coerce")
+    # Compare each of the latest candles with its preceding 20-candle average.
+    baseline = vols.shift(1).rolling(20, min_periods=20).mean()
+    tail_v, tail_b = vols.iloc[-SENSI_DEAD_VOLUME_STREAK:], baseline.iloc[-SENSI_DEAD_VOLUME_STREAK:]
+    return bool(tail_b.notna().all() and (tail_v <= SENSI_DEAD_VOLUME_RATIO * tail_b).all())
 
 def check_sensi_strategy(df, market_code, is_margin=True):
     if len(df) < 55:
@@ -715,129 +730,14 @@ def tracker_stats():
 
 
 
-# ================= Order Book Watcher =================
-ORDERBOOK_DEPTH_LEVELS = 15
-ORDERBOOK_IMBALANCE_MULT = 2.5
-ORDERBOOK_WHALE_DEPTH_FRACTION = 0.35
-ORDERBOOK_WHALE_AVG_MULT = 4.0
-ORDERBOOK_WALL_DISTANCE_PCT = 0.02
-
-def fetch_order_book(symbol):
-    """Fetch Bitpin depth. Prefer the user-provided /mth/ path, then /mkt/ and .ir."""
-    urls = [
-        f"{BASE_API}/v1/mth/orderbook/{symbol}/",
-        f"{BASE_API}/v1/mkt/orderbook/{symbol}/",
-        f"https://api.bitpin.ir/api/v1/mth/orderbook/{symbol}/",
-        f"https://api.bitpin.ir/api/v1/mkt/orderbook/{symbol}/",
-    ]
-    headers = {"User-Agent": "Mozilla/5.0"}
-    for url in urls:
-        try:
-            response = requests.get(url, headers=headers, timeout=5)
-            if response.status_code != 200:
-                continue
-            data = response.json()
-            if isinstance(data, dict) and isinstance(data.get("data"), dict):
-                data = data["data"]
-            if not isinstance(data, dict):
-                continue
-            orders = data.get("orders", data)
-            if isinstance(orders, dict) and ("bids" in orders or "asks" in orders):
-                return {"bids": orders.get("bids", []), "asks": orders.get("asks", [])}
-        except Exception as exc:
-            print(f"[OrderBook] Fetch failed {url}: {exc}")
-    return None
-
-def _orderbook_levels(raw_levels):
-    """Normalize public API list/dict levels into positive (price, amount) pairs."""
-    levels = []
-    if not isinstance(raw_levels, (list, tuple)):
-        return levels
-    for item in raw_levels[:ORDERBOOK_DEPTH_LEVELS]:
-        try:
-            if isinstance(item, dict):
-                price = float(item.get("price", item.get("rate")))
-                amount = float(item.get("amount", item.get("volume", item.get("quantity", item.get("qty")))))
-            else:
-                price, amount = float(item[0]), float(item[1])
-            if math.isfinite(price) and math.isfinite(amount) and price > 0 and amount > 0:
-                levels.append((price, amount))
-        except (TypeError, ValueError, IndexError):
-            continue
-    return levels
-
-# Self-contained velocity snapshots; no external metrics module or service required.
-ORDERBOOK_VELOCITY_STATE = {}
-ORDERBOOK_WALL_COOLDOWN_SECONDS = 900
-
+# Candle volume velocity is used only for Bitpin companion trade alerts.
 def calculate_volume_velocity(df, periods=3):
-    """Current candle volume acceleration versus recent candles; returns auditable ratios."""
     if df is None or len(df) < periods + 2 or "volume" not in df:
         return {"current_volume": None, "baseline_volume": None, "volume_velocity": None}
     current = float(df.iloc[-1]["volume"])
     baseline = float(df["volume"].iloc[-(periods + 1):-1].mean())
     return {"current_volume": current, "baseline_volume": baseline,
             "volume_velocity": current / baseline if baseline > 0 else None}
-
-def calculate_orderbook_velocity(book, symbol, now=None):
-    """Compare depth totals with this symbol's preceding local snapshot (volumes/sec)."""
-    now = time.time() if now is None else float(now)
-    bids = _orderbook_levels(book.get("bids", [])) if isinstance(book, dict) else []
-    asks = _orderbook_levels(book.get("asks", [])) if isinstance(book, dict) else []
-    bid_total, ask_total = sum(v for _, v in bids), sum(v for _, v in asks)
-    prior = ORDERBOOK_VELOCITY_STATE.get(symbol)
-    result = {"bid_depth_velocity": None, "ask_depth_velocity": None}
-    if prior:
-        elapsed = now - prior["time"]
-        if elapsed > 0:
-            result["bid_depth_velocity"] = (bid_total-prior["bid"]) / elapsed
-            result["ask_depth_velocity"] = (ask_total-prior["ask"]) / elapsed
-    ORDERBOOK_VELOCITY_STATE[symbol] = {"time": now, "bid": bid_total, "ask": ask_total}
-    return result
-
-def analyze_order_book(book, direction, current_price, symbol=None):
-    """Return adverse depth alerts and auditable depth metrics; no alert on bad inputs."""
-    if not isinstance(book, dict) or direction not in ("LONG", "SHORT"):
-        return [], {}
-    try:
-        price_now = float(current_price)
-    except (TypeError, ValueError):
-        return [], {}
-    if not math.isfinite(price_now) or price_now <= 0:
-        return [], {}
-    bids = _orderbook_levels(book.get("bids", []))
-    asks = _orderbook_levels(book.get("asks", []))
-    bid_volume = sum(amount for _, amount in bids)
-    ask_volume = sum(amount for _, amount in asks)
-    total = bid_volume + ask_volume
-    metrics = {"bid_volume": bid_volume, "ask_volume": ask_volume,
-               "imbalance_ratio": bid_volume / ask_volume if ask_volume else None,
-               "levels": len(bids) + len(asks)}
-    if symbol is not None:
-        metrics.update(calculate_orderbook_velocity(book, symbol))
-    if not bids or not asks or total <= 0:
-        return [], metrics
-    alerts = []
-    if direction == "LONG" and ask_volume >= ORDERBOOK_IMBALANCE_MULT * bid_volume:
-        alerts.append(("orderbook_imbalance", "⚠️ عدم تعادل سنگین اردربوک (فشار فروش در عمق بازار)"))
-    elif direction == "SHORT" and bid_volume >= ORDERBOOK_IMBALANCE_MULT * ask_volume:
-        alerts.append(("orderbook_imbalance", "⚠️ عدم تعادل سنگین اردربوک (فشار خرید و حمایت سنگین در عمق بازار)"))
-
-    # Whale threshold is evaluated against all returned top-depth levels.
-    all_volumes = [v for _, v in bids + asks]
-    avg_level = total / len(all_volumes) if all_volumes else 0
-    whale = lambda amount: amount >= ORDERBOOK_WHALE_DEPTH_FRACTION * total or (avg_level > 0 and amount > ORDERBOOK_WHALE_AVG_MULT * avg_level)
-    if direction == "LONG":
-        walls = [(p, v) for p, v in asks if p >= price_now and (p-price_now)/price_now <= ORDERBOOK_WALL_DISTANCE_PCT and whale(v)]
-        if walls:
-            alerts.append(("whale_wall", "🐋 دیوار فروش سنگین (Whale Sell Wall) در اردر بوک شناسایی شد!"))
-    else:
-        walls = [(p, v) for p, v in bids if p <= price_now and (price_now-p)/price_now <= ORDERBOOK_WALL_DISTANCE_PCT and whale(v)]
-        if walls:
-            alerts.append(("whale_wall", "🐋 دیوار خرید سنگین (Whale Buy Wall) در اردر بوک شناسایی شد!"))
-    metrics["whale_walls"] = walls if "walls" in locals() else []
-    metrics["total_depth"] = total
-    return alerts, metrics
 
 def companion_alerts(sig, df):
     """Return alert texts and state updates from latest candle; direction symmetric."""
@@ -927,12 +827,6 @@ def run_signal_tracker():
                 if df is None or df.empty:
                     continue
                 alerts, updates = companion_alerts(sig, df)
-                # Query depth once each tracker cycle (60s); deduplication below is per candle/signal.
-                book = fetch_order_book(sig["symbol"])
-                if book:
-                    ob_alerts, _ob_metrics = analyze_order_book(book, sig.get("direction"), float(df.iloc[-1].close), sig["symbol"])
-                    candle_tag = str(df.iloc[-1].get("timestamp", df.index[-1]))
-                    alerts.extend((key, text, candle_tag) for key, text in ob_alerts)
                 changed = False
                 with tracker_lock:
                     record = signal_tracker.get(sid)
@@ -940,18 +834,10 @@ def run_signal_tracker():
                         continue
                     record.update(updates)
                     sent = record.setdefault("last_companion_alert", {})
-                    wall_present = any(key == "whale_wall" for key, _message, _tag in alerts)
-                    if not wall_present:
-                        record["wall_alert_active"] = False
                     for key, message, candle_id in alerts:
-                        # Wall alerts are sent only once while the wall remains continuously present.
-                        if key == "whale_wall" and record.get("wall_alert_active"):
-                            continue
                         if sent.get(key) == candle_id or (key in ("tp1_milestone", "trail_50", "trail_75") and sent.get(key)):
                             continue
                         sent[key] = candle_id
-                        if key == "whale_wall":
-                            record["wall_alert_active"] = True
                         send_telegram(f"{message}\nSymbol: {sig['symbol']} | Side: {sig['direction']}")
                     if updates.get("status") in ("HIT_SL", "HIT_TP2"):
                         record["hit_time"] = datetime.now(timezone.utc).isoformat()
@@ -963,6 +849,140 @@ def run_signal_tracker():
                     save_tracker()
         except Exception as e:
             print(f"[Tracker Loop Error] {e}")
+
+
+# ================= Category 2: Binance Futures OI / volume whale tracker =================
+BINANCE_FAPI = "https://fapi.binance.com"
+ELI_WHALE_NAME = "الی نهنگ"
+ELI_WHALE_INTERVAL = int(os.getenv("ELI_WHALE_INTERVAL", "300"))
+ELI_WHALE_UNIVERSE_SIZE = int(os.getenv("ELI_WHALE_UNIVERSE_SIZE", "25"))
+ELI_OI_SURGE_PCT = float(os.getenv("ELI_OI_SURGE_PCT", "0.60"))
+ELI_VOLUME_SURGE_MULT = float(os.getenv("ELI_VOLUME_SURGE_MULT", "2.0"))
+ELI_MIN_5M_QUOTE_VOLUME = float(os.getenv("ELI_MIN_5M_QUOTE_VOLUME", "1000000"))
+ELI_STATE = {"oi": {}, "last_alert": {}, "last_global_oi": None}
+ELI_LOCK = threading.Lock()
+
+def _binance_get(path, params=None, timeout=12):
+    response = requests.get(BINANCE_FAPI + path, params=params or {}, timeout=timeout)
+    response.raise_for_status()
+    return response.json()
+
+def fetch_binance_futures_universe(limit=ELI_WHALE_UNIVERSE_SIZE):
+    """USDT-margined perpetuals with highest 24h quote turnover."""
+    try:
+        exchange_info = _binance_get("/fapi/v1/exchangeInfo")
+        allowed = {x["symbol"] for x in exchange_info.get("symbols", [])
+                   if x.get("status") == "TRADING" and x.get("contractType") == "PERPETUAL"
+                   and x.get("quoteAsset") == "USDT"}
+        tickers = _binance_get("/fapi/v1/ticker/24hr")
+        ranked = [(float(t.get("quoteVolume", 0)), t.get("symbol")) for t in tickers
+                  if t.get("symbol") in allowed]
+        return [sym for _vol, sym in sorted(ranked, reverse=True)[:max(1, limit)]]
+    except Exception as exc:
+        print(f"[Eli Whale] Universe fetch failed: {exc}")
+        return []
+
+def fetch_binance_oi(symbol):
+    try:
+        payload = _binance_get("/fapi/v1/openInterest", {"symbol": symbol})
+        value = float(payload.get("openInterest", 0))
+        return value if math.isfinite(value) and value > 0 else None
+    except Exception as exc:
+        print(f"[Eli Whale] OI fetch {symbol}: {exc}")
+        return None
+
+def fetch_binance_5m_volume_surge(symbol):
+    """Return (latest closed 5m quote volume, prior-20 mean, closed-candle move %)."""
+    try:
+        klines = _binance_get("/fapi/v1/klines", {"symbol": symbol, "interval": "5m", "limit": 22})
+        if not isinstance(klines, list) or len(klines) < 22:
+            return None
+        # Ignore the still-forming final kline. Use its preceding 20 candles as baseline.
+        closed = klines[:-1]
+        latest = closed[-1]
+        volumes = [float(k[7]) for k in closed[-21:-1]]
+        current_volume = float(latest[7])
+        average = sum(volumes) / len(volumes) if volumes else 0.0
+        open_price, close_price = float(latest[1]), float(latest[4])
+        change_pct = (close_price / open_price - 1) * 100 if open_price > 0 else 0.0
+        return current_volume, average, change_pct
+    except Exception as exc:
+        print(f"[Eli Whale] 5m volume fetch {symbol}: {exc}")
+        return None
+
+def format_compact_number(value):
+    """Keep figures selectable/copyable, without separators or scientific notation."""
+    return f"{float(value):.6f}".rstrip("0").rstrip(".")
+
+def scan_eli_whale_once(symbols=None):
+    """Independent futures scan; it never touches Bitpin signal/tracker state."""
+    symbols = symbols if symbols is not None else fetch_binance_futures_universe()
+    if not symbols:
+        return
+    samples, current_total = {}, 0.0
+    for symbol in symbols:
+        oi = fetch_binance_oi(symbol)
+        if oi is not None:
+            samples[symbol] = oi
+            current_total += oi
+    with ELI_LOCK:
+        previous_total = ELI_STATE.get("last_global_oi")
+        previous = dict(ELI_STATE.get("oi", {}))
+        ELI_STATE["oi"] = samples.copy()
+        ELI_STATE["last_global_oi"] = current_total if samples else previous_total
+    global_pct = ((current_total / previous_total - 1) * 100
+                  if previous_total and previous_total > 0 and current_total > 0 else None)
+    # First pass establishes a baseline; on subsequent rounds compare same-symbol OI snapshots.
+    for symbol, oi_now in samples.items():
+        oi_before = previous.get(symbol)
+        if not oi_before or oi_before <= 0:
+            continue
+        oi_pct = (oi_now / oi_before - 1) * 100
+        if oi_pct < ELI_OI_SURGE_PCT:
+            continue
+        vol_data = fetch_binance_5m_volume_surge(symbol)
+        if not vol_data:
+            continue
+        quote_vol, avg_vol, price_change = vol_data
+        vol_mult = quote_vol / avg_vol if avg_vol > 0 else 0
+        if quote_vol < ELI_MIN_5M_QUOTE_VOLUME or vol_mult < ELI_VOLUME_SURGE_MULT:
+            continue
+        # Rising OI plus a large taker-agnostic volume impulse; direction follows 5m price action.
+        direction = "LONG" if price_change >= 0 else "SHORT"
+        candle_tag = int(time.time() // max(60, ELI_WHALE_INTERVAL))
+        dedup_key = (symbol, direction)
+        with ELI_LOCK:
+            if ELI_STATE["last_alert"].get(dedup_key) == candle_tag:
+                continue
+            ELI_STATE["last_alert"][dedup_key] = candle_tag
+        global_text = f"{global_pct:+.2f}%" if global_pct is not None else "baseline"
+        message = (
+            f"🐋 {ELI_WHALE_NAME} | Binance USDⓈ-M Futures\n"
+            f"{symbol}  {direction}\n"
+            f"OI change: {oi_pct:+.2f}% | Global tracked OI: {global_text}\n"
+            f"5m quote volume: {format_compact_number(quote_vol)} USDT "
+            f"({vol_mult:.2f}x prior-20 avg)\n"
+            f"5m price change: {price_change:+.2f}%\n"
+            "نوع: ردیاب مستقل OI و ورود حجم؛ این پیام سیگنال بیت‌پین/سفارش معاملاتی نیست."
+        )
+        send_telegram(message)
+
+def run_eli_whale_tracker():
+    """Category 2 polling loop, intentionally isolated from the Bitpin scanner."""
+    print(f"{ELI_WHALE_NAME} Binance Futures tracker started.")
+    cached_universe, refreshed_at = [], 0.0
+    while True:
+        try:
+            now = time.time()
+            if not cached_universe or now - refreshed_at >= 3600:
+                cached_universe = fetch_binance_futures_universe()
+                refreshed_at = now
+            if cached_universe:
+                scan_eli_whale_once(cached_universe)
+            time.sleep(max(60, ELI_WHALE_INTERVAL))
+        except Exception as exc:
+            print(f"[Eli Whale Loop Error] {exc}")
+            time.sleep(30)
 
 # ================= Telegram /stats =================
 def telegram_stats_command_handler():
@@ -1006,7 +1026,7 @@ def btc_long_middle_band_confirmed():
         btc_df = calculate_indicators(btc_df)
         if btc_df is None or len(btc_df) < 2:
             return False
-        closed = btc_df.iloc[-1]
+        closed = btc_df.iloc[-2]
         close = closed.get("close")
         middle = closed.get("bb_middle")
         if pd.isna(close) or pd.isna(middle) or not (float(close) > float(middle)):
@@ -1161,5 +1181,8 @@ if __name__ == "__main__":
 
     stats_thread = threading.Thread(target=telegram_stats_command_handler, daemon=True)
     stats_thread.start()
+
+    eli_whale_thread = threading.Thread(target=run_eli_whale_tracker, daemon=True)
+    eli_whale_thread.start()
 
     run_scanner()
