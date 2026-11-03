@@ -17,7 +17,13 @@ TELEGRAM_CHAT_ID = "6643451227"
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 BASE_API = "https://api.bitpin.org/api"
-BINANCE_FAPI = "https://fapi.binance.com"
+# Public spot-market data only; mirrors are fallbacks, not a guarantee against every regional block.
+BINANCE_SPOT_BASES = tuple(
+    base.rstrip("/") for base in os.getenv(
+        "BINANCE_SPOT_BASES",
+        "https://data-api.binance.vision,https://api.binance.com,https://www.binance.com"
+    ).split(",") if base.strip()
+)
 PRICE_CHECK_TOLERANCE_PCT = float(os.getenv("PRICE_CHECK_TOLERANCE_PCT", "1.0"))
 OHLC_URL = f"{BASE_API}/v1/mkt/candles/"  # اندپوینت رسمی بیت‌پین
 
@@ -177,10 +183,8 @@ def compare_binance_bitpin_price(market_code, bitpin_price=None, binance_symbol=
         bitpin = float(bitpin_price) if bitpin_price is not None else fetch_bitpin_ticker_price(market_code)
         if bitpin is None or not math.isfinite(bitpin) or bitpin <= 0:
             return False, None, None, None
-        response = requests.get("https://api.binance.com/api/v3/ticker/price",
-                                params={"symbol": binance_symbol}, timeout=8)
-        response.raise_for_status()
-        payload = response.json()
+        payload = _binance_get("/api/v3/ticker/price",
+                               params={"symbol": binance_symbol}, timeout=8)
         binance = float(payload.get("price"))
         if not math.isfinite(binance) or binance <= 0:
             raise ValueError("Invalid Binance ticker price")
@@ -885,141 +889,85 @@ def run_signal_tracker():
             print(f"[Tracker Loop Error] {e}")
 
 
-# ================= Category 2: Binance Futures OI / volume whale tracker =================
-BINANCE_FAPI = "https://fapi.binance.com"
+# ================= Category 2: Binance spot volume-surge tracker =================
 ELI_WHALE_NAME = "الی نهنگ"
 ELI_WHALE_INTERVAL = int(os.getenv("ELI_WHALE_INTERVAL", "300"))
 ELI_WHALE_UNIVERSE_SIZE = int(os.getenv("ELI_WHALE_UNIVERSE_SIZE", "25"))
-ELI_OI_SURGE_PCT = float(os.getenv("ELI_OI_SURGE_PCT", "0.60"))
 ELI_VOLUME_SURGE_MULT = float(os.getenv("ELI_VOLUME_SURGE_MULT", "2.0"))
 ELI_MIN_5M_QUOTE_VOLUME = float(os.getenv("ELI_MIN_5M_QUOTE_VOLUME", "1000000"))
-ELI_STATE = {"oi": {}, "last_alert": {}, "last_global_oi": None}
+ELI_STATE = {"last_alert": {}}
 ELI_LOCK = threading.Lock()
-
-# Public USD-M Futures API mirrors; request fallback is isolated from all strategy logic.
-BINANCE_FAPI_ENDPOINTS = [
-    BINANCE_FAPI,
-    "https://fapi1.binance.com",
-    "https://fapi2.binance.com",
-    "https://fapi3.binance.com",
-    "https://fapi4.binance.com",
-]
-BINANCE_USER_AGENT = "Mozilla/5.0 (compatible; BitpinTradingBot/1.0)"
 
 
 def _binance_get(path, params=None, timeout=12):
-    """GET USD-M Futures data with a User-Agent and failover across Binance hosts."""
-    headers = {"User-Agent": BINANCE_USER_AGENT, "Accept": "application/json"}
-    failures = []
-    for base_url in BINANCE_FAPI_ENDPOINTS:
+    """Fetch public spot data, rotating through configurable Binance API mirrors."""
+    errors = []
+    for base in BINANCE_SPOT_BASES:
         try:
-            response = requests.get(base_url + path, params=params or {},
-                                    headers=headers, timeout=timeout)
+            response = requests.get(base + path, params=params or {}, timeout=timeout,
+                                    headers={"User-Agent": "Mozilla/5.0"})
             response.raise_for_status()
-            return response.json()
+            payload = response.json()
+            if isinstance(payload, dict) and payload.get("code") not in (None, 0):
+                raise ValueError(f"Binance API error: {payload}")
+            return payload
         except Exception as exc:
-            failures.append(f"{base_url}: {exc}")
-    raise RuntimeError("All Binance Futures endpoints failed: " + " | ".join(failures))
+            errors.append(f"{base}: {exc}")
+    raise RuntimeError("All public Binance spot endpoints failed: " + " | ".join(errors))
 
 
-BINANCE_HEALTH_INTERVAL = max(60, int(os.getenv("BINANCE_HEALTH_INTERVAL", "3600")))
-
-
-def run_binance_health_check():
-    """Periodically ping Binance Futures and report connectivity to Telegram and logs."""
-    while True:
-        checked_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-        try:
-            _binance_get("/fapi/v1/ping", timeout=8)
-            message = f"✅ سلامت اتصال Binance Futures: برقرار است\nزمان: {checked_at}"
-            print(f"[Binance Health] OK at {checked_at}")
-        except Exception as exc:
-            message = f"❌ سلامت اتصال Binance Futures: ناموفق\nزمان: {checked_at}\nخطا: {exc}"
-            print(f"[Binance Health] FAILED at {checked_at}: {exc}")
-        send_telegram(message)
-        time.sleep(BINANCE_HEALTH_INTERVAL)
-
-def fetch_binance_futures_universe(limit=ELI_WHALE_UNIVERSE_SIZE):
-    """USDT-margined perpetuals with highest 24h quote turnover."""
+def fetch_binance_spot_universe(limit=ELI_WHALE_UNIVERSE_SIZE):
+    """Rank actively trading USDT spot pairs by 24-hour quote turnover."""
     try:
-        exchange_info = _binance_get("/fapi/v1/exchangeInfo")
+        exchange_info = _binance_get("/api/v3/exchangeInfo")
         allowed = {x["symbol"] for x in exchange_info.get("symbols", [])
-                   if x.get("status") == "TRADING" and x.get("contractType") == "PERPETUAL"
-                   and x.get("quoteAsset") == "USDT"}
-        tickers = _binance_get("/fapi/v1/ticker/24hr")
+                   if x.get("status") == "TRADING" and x.get("quoteAsset") == "USDT"
+                   and x.get("isSpotTradingAllowed", True)}
+        tickers = _binance_get("/api/v3/ticker/24hr")
         ranked = [(float(t.get("quoteVolume", 0)), t.get("symbol")) for t in tickers
                   if t.get("symbol") in allowed]
         return [sym for _vol, sym in sorted(ranked, reverse=True)[:max(1, limit)]]
     except Exception as exc:
-        print(f"[Eli Whale] Universe fetch failed: {exc}")
+        print(f"[Eli Whale] Spot universe fetch failed: {exc}")
         return []
 
-def fetch_binance_oi(symbol):
-    try:
-        payload = _binance_get("/fapi/v1/openInterest", {"symbol": symbol})
-        value = float(payload.get("openInterest", 0))
-        return value if math.isfinite(value) and value > 0 else None
-    except Exception as exc:
-        print(f"[Eli Whale] OI fetch {symbol}: {exc}")
-        return None
 
 def fetch_binance_5m_volume_surge(symbol):
-    """Return (latest closed 5m quote volume, prior-20 mean, closed-candle move %)."""
+    """Return last closed 5m quote volume, preceding-20 average, and price move %."""
     try:
-        klines = _binance_get("/fapi/v1/klines", {"symbol": symbol, "interval": "5m", "limit": 22})
+        klines = _binance_get("/api/v3/klines", {"symbol": symbol, "interval": "5m", "limit": 22})
         if not isinstance(klines, list) or len(klines) < 22:
             return None
-        # Ignore the still-forming final kline. Use its preceding 20 candles as baseline.
-        closed = klines[:-1]
-        latest = closed[-1]
-        volumes = [float(k[7]) for k in closed[-21:-1]]
+        # Last returned candle is normally still forming; use closed bars only.
+        latest = klines[-2]
+        baseline = klines[-22:-2]
+        volumes = [float(k[7]) for k in baseline]  # quote-asset volume
         current_volume = float(latest[7])
         average = sum(volumes) / len(volumes) if volumes else 0.0
         open_price, close_price = float(latest[1]), float(latest[4])
         change_pct = (close_price / open_price - 1) * 100 if open_price > 0 else 0.0
         return current_volume, average, change_pct
     except Exception as exc:
-        print(f"[Eli Whale] 5m volume fetch {symbol}: {exc}")
+        print(f"[Eli Whale] Spot 5m volume fetch {symbol}: {exc}")
         return None
+
 
 def format_compact_number(value):
     """Keep figures selectable/copyable, without separators or scientific notation."""
     return f"{float(value):.6f}".rstrip("0").rstrip(".")
 
+
 def scan_eli_whale_once(symbols=None):
-    """Independent futures scan; it never touches Bitpin signal/tracker state."""
-    symbols = symbols if symbols is not None else fetch_binance_futures_universe()
-    if not symbols:
-        return
-    samples, current_total = {}, 0.0
-    for symbol in symbols:
-        oi = fetch_binance_oi(symbol)
-        if oi is not None:
-            samples[symbol] = oi
-            current_total += oi
-    with ELI_LOCK:
-        previous_total = ELI_STATE.get("last_global_oi")
-        previous = dict(ELI_STATE.get("oi", {}))
-        ELI_STATE["oi"] = samples.copy()
-        ELI_STATE["last_global_oi"] = current_total if samples else previous_total
-    global_pct = ((current_total / previous_total - 1) * 100
-                  if previous_total and previous_total > 0 and current_total > 0 else None)
-    # First pass establishes a baseline; on subsequent rounds compare same-symbol OI snapshots.
-    for symbol, oi_now in samples.items():
-        oi_before = previous.get(symbol)
-        if not oi_before or oi_before <= 0:
-            continue
-        oi_pct = (oi_now / oi_before - 1) * 100
-        if oi_pct < ELI_OI_SURGE_PCT:
-            continue
+    """Spot-only volume scanner; spot APIs do not provide futures open interest."""
+    symbols = symbols if symbols is not None else fetch_binance_spot_universe()
+    for symbol in symbols or []:
         vol_data = fetch_binance_5m_volume_surge(symbol)
         if not vol_data:
             continue
         quote_vol, avg_vol, price_change = vol_data
-        vol_mult = quote_vol / avg_vol if avg_vol > 0 else 0
+        vol_mult = quote_vol / avg_vol if avg_vol > 0 else 0.0
         if quote_vol < ELI_MIN_5M_QUOTE_VOLUME or vol_mult < ELI_VOLUME_SURGE_MULT:
             continue
-        # Rising OI plus a large taker-agnostic volume impulse; direction follows 5m price action.
         direction = "LONG" if price_change >= 0 else "SHORT"
         market_code = symbol[:-4] + "_USDT" if symbol.endswith("USDT") else symbol
         price_ok, bitpin_price, binance_price, price_diff = compare_binance_bitpin_price(
@@ -1032,29 +980,28 @@ def scan_eli_whale_once(symbols=None):
             if ELI_STATE["last_alert"].get(dedup_key) == candle_tag:
                 continue
             ELI_STATE["last_alert"][dedup_key] = candle_tag
-        global_text = f"{global_pct:+.2f}%" if global_pct is not None else "baseline"
         message = (
-            f"🐋 {ELI_WHALE_NAME} | Binance USDⓈ-M Futures\n"
+            f"🐋 {ELI_WHALE_NAME} | Binance Spot Market\n"
             f"{symbol}  {direction}\n"
-            f"OI change: {oi_pct:+.2f}% | Global tracked OI: {global_text}\n"
             f"5m quote volume: {format_compact_number(quote_vol)} USDT "
             f"({vol_mult:.2f}x prior-20 avg)\n"
             f"5m price change: {price_change:+.2f}%\n"
             f"Price check: Binance {format_compact_number(binance_price)} | Bitpin {format_compact_number(bitpin_price)} | "
             f"difference {price_diff:.3f}% (max {PRICE_CHECK_TOLERANCE_PCT:.1f}%)\n"
-            "نوع: ردیاب مستقل OI و ورود حجم؛ این پیام سیگنال بیت‌پین/سفارش معاملاتی نیست."
+            "نوع: ردیاب اسپات حجم بازار؛ داده OI فیوچرز نیست و پیام سفارش معاملاتی محسوب نمی‌شود."
         )
         send_telegram(message)
 
+
 def run_eli_whale_tracker():
-    """Category 2 polling loop, intentionally isolated from the Bitpin scanner."""
-    print(f"{ELI_WHALE_NAME} Binance Futures tracker started.")
+    """Spot-market volume polling loop, isolated from the Bitpin scanner."""
+    print(f"{ELI_WHALE_NAME} Binance Spot tracker started.")
     cached_universe, refreshed_at = [], 0.0
     while True:
         try:
             now = time.time()
             if not cached_universe or now - refreshed_at >= 3600:
-                cached_universe = fetch_binance_futures_universe()
+                cached_universe = fetch_binance_spot_universe()
                 refreshed_at = now
             if cached_universe:
                 scan_eli_whale_once(cached_universe)
@@ -1263,8 +1210,5 @@ if __name__ == "__main__":
 
     eli_whale_thread = threading.Thread(target=run_eli_whale_tracker, daemon=True)
     eli_whale_thread.start()
-
-    binance_health_thread = threading.Thread(target=run_binance_health_check, daemon=True)
-    binance_health_thread.start()
 
     run_scanner()
