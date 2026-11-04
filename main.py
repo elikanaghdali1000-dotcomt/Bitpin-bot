@@ -47,15 +47,6 @@ SENSI_SHORT_DEAD_FLOOR_BUFFER = float(os.getenv("SENSI_SHORT_DEAD_FLOOR_BUFFER",
 tracker_lock = threading.RLock()
 signal_tracker = {}
 
-BR_MAX_RETEST_CANDLES = 8
-BR_RETEST_TOLERANCE_PCT = 0.0015
-BR_BREAKOUT_VOL_MULT = 1.5
-BR_MIN_BREAKOUT_BODY_RATIO = 0.55
-BR_MIN_REJECTION_BODY_RATIO = 0.30
-BR_PENDING_SHORT = {}
-BR_LAST_PROCESSED = {}
-BR_PENDING_LONG = {}
-
 MARGIN_SYMBOLS = [
     "BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT",
     "ADA_USDT", "AVAX_USDT", "SUI_USDT", "LINK_USDT", "NEAR_USDT",
@@ -65,6 +56,14 @@ MARGIN_SYMBOLS = [
     "FIL_USDT", "ETC_USDT", "AAVE_USDT", "RUNE_USDT", "KAS_USDT",
     "TON_USDT", "GALA_USDT", "FTM_USDT", "SAND_USDT", "MANA_USDT"
 ]
+
+# هدرهای ضد فیلتر و شبیه‌ساز مرورگر برای عبور از خطای 403
+BITPIN_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://bitpin.ir/"
+}
 
 # وضعیت سلامت و نظارت سیستم
 system_health = {
@@ -136,9 +135,9 @@ def send_telegram(text, parse_mode="HTML"):
         return False
 
 # ==========================================
-# 4. واکشی داده‌های بازار (بیت‌پین و بایننس)
+# 4. واکشی داده‌های بازار (بیت‌پین با هدرهای مرورگر و بایننس)
 # ==========================================
-def _binance_get(path, params=None, timeout=8):
+def _binance_get(path, params=None, timeout=6):
     last_err = None
     for base in BINANCE_SPOT_BASES:
         try:
@@ -147,50 +146,50 @@ def _binance_get(path, params=None, timeout=8):
             if r.status_code == 200:
                 system_health["last_binance_status"] = "OK"
                 return r.json()
-            elif r.status_code in (403, 451):
-                last_err = f"Geo-blocked ({r.status_code})"
-                continue
         except Exception as e:
             last_err = str(e)
             continue
     system_health["last_binance_status"] = f"Error: {last_err}"
-    raise RuntimeError(f"All Binance spot mirrors failed. Last error: {last_err}")
+    return None
 
 def fetch_bitpin_ticker_price(market_code):
     try:
         url = f"{BASE_API}/v1/mkt/tickers/"
-        res = requests.get(url, timeout=7)
+        res = requests.get(url, headers=BITPIN_HEADERS, timeout=7)
         if res.status_code == 200:
             system_health["last_bitpin_status"] = "OK"
             data = res.json()
             for item in data.get("results", []):
                 if item.get("code") == market_code:
                     return float(item.get("price"))
+        else:
+            system_health["last_bitpin_status"] = f"HTTP {res.status_code}"
     except Exception as e:
         system_health["last_bitpin_status"] = f"Ticker Error: {e}"
     return None
 
-def compare_binance_bitpin_price(market_code, bitpin_price=None, binance_symbol=None):
+def compare_binance_bitpin_price(market_code, bitpin_price=None):
     market_code = str(market_code).upper()
-    if not binance_symbol:
-        base = market_code[:-5] if market_code.endswith("_USDT") else market_code.replace("_", "")
-        binance_symbol = base + "USDT"
+    binance_symbol = market_code.replace("_", "")
+
+    bitpin = float(bitpin_price) if bitpin_price is not None else fetch_bitpin_ticker_price(market_code)
+    if not bitpin or bitpin <= 0:
+        print(f"[Price Check] Could not get valid Bitpin price for {market_code}")
+        return False, None, None, 0.0
+
+    binance_payload = _binance_get("/api/v3/ticker/price", params={"symbol": binance_symbol})
+    if not binance_payload or "price" not in binance_payload:
+        return True, bitpin, None, 0.0
 
     try:
-        bitpin = float(bitpin_price) if bitpin_price is not None else fetch_bitpin_ticker_price(market_code)
-        if not bitpin or bitpin <= 0:
-            return False, None, None, None
-
-        payload = _binance_get("/api/v3/ticker/price", params={"symbol": binance_symbol}, timeout=6)
-        binance = float(payload.get("price", 0))
+        binance = float(binance_payload["price"])
         if binance <= 0:
-            return False, bitpin, None, None
+            return True, bitpin, None, 0.0
 
         diff_pct = abs(bitpin - binance) / binance * 100.0
         passed = diff_pct <= PRICE_CHECK_TOLERANCE_PCT
         return passed, bitpin, binance, diff_pct
-    except Exception as exc:
-        print(f"[Price Check Fallback] {market_code}: {exc}")
+    except Exception:
         return True, bitpin, None, 0.0
 
 def fetch_bitpin_candles(symbol, resolution="15", count=120):
@@ -206,7 +205,7 @@ def fetch_bitpin_candles(symbol, resolution="15", count=120):
         "res": res_str,
     }
     try:
-        res = requests.get(OHLC_URL, params=params, timeout=10)
+        res = requests.get(OHLC_URL, headers=BITPIN_HEADERS, params=params, timeout=10)
         if res.status_code == 200:
             system_health["last_bitpin_status"] = "OK"
             data = res.json()
@@ -235,25 +234,21 @@ def calculate_indicators(df):
     d = df.copy()
     c = d["close"]
     
-    # بولینگر
     d["bb_mid"] = c.rolling(BB_PERIOD).mean()
     d["bb_std"] = c.rolling(BB_PERIOD).std()
     d["bb_upper"] = d["bb_mid"] + (BB_STD * d["bb_std"])
     d["bb_lower"] = d["bb_mid"] - (BB_STD * d["bb_std"])
     d["bandwidth"] = ((d["bb_upper"] - d["bb_lower"]) / d["bb_mid"]) * 100.0
 
-    # EMA و Volume MA
     d["ema200"] = c.ewm(span=200, adjust=False).mean()
     d["vol_ma20"] = d["volume"].rolling(20).mean()
 
-    # RSI
     delta = c.diff()
     gain = (delta.where(delta > 0, 0)).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
     rs = gain / (loss + 1e-9)
     d["rsi"] = 100 - (100 / (1 + rs))
 
-    # ATR
     hl = d["high"] - d["low"]
     hc = (d["high"] - c.shift()).abs()
     lc = (d["low"] - c.shift()).abs()
@@ -289,7 +284,6 @@ def format_price(p):
 def build_signal(symbol, direction, strategy_name, entry, sl, tp1, tp2=None):
     passed, bitpin_p, binance_p, diff = compare_binance_bitpin_price(symbol, bitpin_price=entry)
     if not passed:
-        print(f"[Filter Rejected] {symbol}: Price diff with Binance is {diff:.2f}% (Limit: {PRICE_CHECK_TOLERANCE_PCT}%)")
         return None
 
     entry_clean = bitpin_p or entry
@@ -315,7 +309,7 @@ def build_signal(symbol, direction, strategy_name, entry, sl, tp1, tp2=None):
     return text
 
 # ==========================================
-# 7. استراتژی‌های معاملاتی (حفظ دقیق منطق شما روی کندل آخر)
+# 7. استراتژی‌های معاملاتی (حفظ دقیق منطق شما)
 # ==========================================
 def check_sensi_strategy(df, symbol, is_margin=True):
     if df is None or len(df) < 55: return None
@@ -466,6 +460,7 @@ def hourly_heartbeat():
                 f"✅ اسکنر و سیستم مانیتورینگ کاملاً فعال هستند.\n"
                 f"⏱ مدت زمان روشن بودن: {uptime}\n"
                 f"📡 وضعیت وب‌سرویس بیت‌پین: <code>{system_health['last_bitpin_status']}</code>\n"
+                f"🌐 وضعیت وب‌سرویس بایننس: <code>{system_health['last_binance_status']}</code>\n"
                 f"🔄 دورهای اسکن انجام‌شده: <b>{system_health['scan_count']}</b>\n"
                 f"🎯 سیگنال‌های موفق: <b>{system_health['signals_sent']}</b>"
             )
@@ -496,14 +491,11 @@ def run_scanner():
                     df_ind = calculate_indicators(df)
                     if df_ind is not None:
                         last_c = df_ind.iloc[-1]["close"]
-                        # لاگ زنده در کنسول Render
                         print(f"[OK] Analyzed {symbol:11s} | Candles: {len(df_ind)} | Close: {last_c}")
 
-                        # فیلتر فشردگی بولینگر
                         if BOLLINGER_SQUEEZE_THRESHOLD > 0 and df_ind.iloc[-1]["bandwidth"] < BOLLINGER_SQUEEZE_THRESHOLD:
                             time.sleep(0.15); continue
 
-                        # بررسی استراتژی‌ها
                         for strat_func in [check_sensi_strategy, check_trend_strategy, check_pullback_strategy]:
                             res = strat_func(df_ind, symbol, is_margin=True)
                             if res:
@@ -530,14 +522,9 @@ def run_scanner():
 # 12. نقطه اجرای اصلی برنامه
 # ==========================================
 if __name__ == "__main__":
-    # ۱. وب‌سرور جهت زنده ماندن در Render
     threading.Thread(target=run_http_server, daemon=True).start()
-    # ۲. پینگ خودکار
     threading.Thread(target=self_ping, daemon=True).start()
-    # ۳. دریافت پیام‌ها و دستورات تلگرام (/ping و /stats)
     threading.Thread(target=telegram_command_handler, daemon=True).start()
-    # ۴. ارسال گزارش دوره‌ای ساعت به ساعت در تلگرام
     threading.Thread(target=hourly_heartbeat, daemon=True).start()
     
-    # ۵. اجرای اسکنر بازار در ریسه اصلی
     run_scanner()
