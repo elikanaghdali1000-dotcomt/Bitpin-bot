@@ -12,18 +12,19 @@ from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
-TELEGRAM_BOT_TOKEN = "8947033412:AAEPvb8CEn5I_9Bxe8oqPuGD1gNjfY5TrUA"
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "secret-d1d6ab56").strip()
 TELEGRAM_CHAT_ID = "6643451227"
 APP_URL = os.getenv("APP_URL", "https://bitpin-bot.onrender.com")
 
 BASE_API = "https://api.bitpin.org/api"
 # Public spot-market data only; mirrors are fallbacks, not a guarantee against every regional block.
-BINANCE_SPOT_BASES = tuple(
-    base.rstrip("/") for base in os.getenv(
-        "BINANCE_SPOT_BASES",
-        "https://data-api.binance.vision,https://api.binance.com,https://www.binance.com"
-    ).split(",") if base.strip()
-)
+# USD-M Futures API origins; ordered fallback rotation. Optional proxy uses standard
+# HTTP(S)_PROXY environment variables or BINANCE_HTTP_PROXY.
+BINANCE_FUTURES_BASES = tuple(base.strip().rstrip("/") for base in os.getenv(
+    "BINANCE_FUTURES_BASES",
+    "https://fapi.binance.com,https://fapi1.binance.com,https://fapi2.binance.com,https://fapi3.binance.com"
+).split(",") if base.strip())
+BINANCE_HTTP_PROXY = os.getenv("BINANCE_HTTP_PROXY", "").strip()
 PRICE_CHECK_TOLERANCE_PCT = float(os.getenv("PRICE_CHECK_TOLERANCE_PCT", "2.5"))
 OHLC_URL = f"{BASE_API}/v1/mkt/candles/"  # اندپوینت رسمی بیت‌پین
 
@@ -129,21 +130,41 @@ def get_health_status():
                                   "last_seen_utc": datetime.fromtimestamp(stamp, timezone.utc).isoformat()}
     hb_ok = bool(heartbeat_status) and all(v["ok"] for v in heartbeat_status.values())
     healthy = all(v["ok"] for v in exchanges.values()) and hb_ok
-    return {"status": "healthy" if healthy else "degraded", "healthy": healthy,
+    return {"status": "HEALTHY" if healthy else "DEGRADED", "healthy": healthy,
             "generated_at_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(),
             "uptime_seconds": round(now - started_at, 1), "data_freshness": exchanges,
             "heartbeats": heartbeat_status}
 
 # ================= سرور داخلی برای زنده نگه داشتن Render =================
 class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        status = get_health_status()
-        body = json.dumps(status, ensure_ascii=False).encode("utf-8")
-        self.send_response(200 if status["healthy"] else 503)
+    def _respond(self, body, code=200):
+        payload = json.dumps(body, ensure_ascii=False, indent=2).encode("utf-8")
+        self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
-        self.wfile.write(body)
+        if self.command != "HEAD":
+            self.wfile.write(payload)
+
+    def do_GET(self):
+        route = self.path.split("?", 1)[0].rstrip("/").lower() or "/"
+        if route == "/health":
+            status = get_health_status()
+            self._respond(status, 200 if status["healthy"] else 503)
+        elif route == "/status":
+            status = get_health_status()
+            self._respond(status, 200 if status["healthy"] else 503)
+        elif route == "/stats":
+            total, wins, losses, open_signals, ambiguous = tracker_stats()
+            self._respond({"total": total, "wins_tp1": wins, "losses_sl": losses,
+                           "open": open_signals, "ambiguous": ambiguous,
+                           "generated_at_utc": datetime.now(timezone.utc).isoformat()})
+        elif route == "/":
+            status = get_health_status()
+            self._respond({"service": "Bitpin strategy bot", "status": status["status"],
+                           "endpoints": ["/health", "/status", "/stats"]}, 200)
+        else:
+            self._respond({"error": "not found", "endpoints": ["/health", "/status", "/stats"]}, 404)
 
     def do_HEAD(self):
         status = get_health_status()
@@ -252,7 +273,7 @@ def compare_binance_bitpin_price(market_code, bitpin_price=None, binance_symbol=
         bitpin = float(bitpin_price) if bitpin_price is not None else fetch_bitpin_ticker_price(market_code)
         if bitpin is None or not math.isfinite(bitpin) or bitpin <= 0:
             return False, None, None, None
-        payload = _binance_get("/api/v3/ticker/price",
+        payload = _binance_get("/fapi/v1/ticker/price",
                                params={"symbol": binance_symbol}, timeout=8)
         binance = float(payload.get("price"))
         if not math.isfinite(binance) or binance <= 0:
@@ -441,8 +462,13 @@ def build_signal(strategy, market_code, direction, entry, order_type, stop, tp1,
     strategy_label = "سنسی در کف" if "سنسی" in str(strategy).lower() else str(strategy)
     sign = 1.0 if direction == "LONG" else -1.0
     pct1 = sign * (tp1 - entry) / entry * 100.0
+    # Informational split-entry plan: execute 30% immediately and rest 70% at
+    # a configurable favorable pullback limit. Existing entry/SL/TP tracking remains.
+    split_pullback_pct = max(0.0, float(os.getenv("SPLIT_PULLBACK_PCT", "0.5"))) / 100.0
+    limit_entry = entry * (1.0 - split_pullback_pct if direction == "LONG" else 1.0 + split_pullback_pct)
     lines = [f"{side_emoji} {symbol} {direction}", strategy_label,
              f". entry: {format_price(entry)}",
+             f"ورود پله‌ای: 30% Market momentum @ {format_price(entry)} + 70% Limit pullback @ {format_price(limit_entry)}",
              f"tp1: {format_price(tp1)} ({pct1:+.1f}%)"]
     if tp2 is not None:
         pct2 = sign * (tp2 - entry) / entry * 100.0
@@ -965,68 +991,69 @@ def run_signal_tracker():
             print(f"[Tracker Loop Error] {e}")
 
 
-# ================= Category 2: Binance spot volume-surge tracker =================
+# ================= Category 2: Binance USD-M Futures volume-surge tracker =================
 ELI_WHALE_NAME = "الی نهنگ"
 ELI_WHALE_INTERVAL = int(os.getenv("ELI_WHALE_INTERVAL", "300"))
 ELI_WHALE_UNIVERSE_SIZE = int(os.getenv("ELI_WHALE_UNIVERSE_SIZE", "25"))
 ELI_VOLUME_SURGE_MULT = float(os.getenv("ELI_VOLUME_SURGE_MULT", "2.0"))
-ELI_MIN_5M_QUOTE_VOLUME = float(os.getenv("ELI_MIN_5M_QUOTE_VOLUME", "1000000"))
+ELI_MIN_5M_QUOTE_VOLUME = float(os.getenv("ELI_MIN_5M_QUOTE_VOLUME", "500000"))
 ELI_STATE = {"last_alert": {}}
 ELI_LOCK = threading.Lock()
 
 
 def _binance_get(path, params=None, timeout=12):
-    """Fetch public spot data, rotating through configurable Binance API mirrors."""
+    """GET USD-M Futures public data with mirror rotation and optional proxy."""
     errors = []
-    for base in BINANCE_SPOT_BASES:
+    proxies = ({"http": BINANCE_HTTP_PROXY, "https": BINANCE_HTTP_PROXY}
+               if BINANCE_HTTP_PROXY else None)
+    for base in BINANCE_FUTURES_BASES:
         try:
             response = requests.get(base + path, params=params or {}, timeout=timeout,
-                                    headers={"User-Agent": "Mozilla/5.0"})
+                                    headers={"User-Agent": "Mozilla/5.0"}, proxies=proxies)
             response.raise_for_status()
             payload = response.json()
             if isinstance(payload, dict) and payload.get("code") not in (None, 0):
-                raise ValueError(f"Binance API error: {payload}")
-            record_data_event("binance", True, path)
+                raise ValueError(f"Binance Futures API error: {payload}")
+            record_data_event("binance", True, f"{base}{path}")
             return payload
         except Exception as exc:
             record_data_event("binance", False, error=exc)
             errors.append(f"{base}: {exc}")
-    raise RuntimeError("All public Binance spot endpoints failed: " + " | ".join(errors))
+    raise RuntimeError("All Binance USD-M Futures endpoints failed: " + " | ".join(errors))
 
 
-def fetch_binance_spot_universe(limit=ELI_WHALE_UNIVERSE_SIZE):
-    """Rank actively trading USDT spot pairs by 24-hour quote turnover."""
+def fetch_binance_futures_universe(limit=ELI_WHALE_UNIVERSE_SIZE):
+    """Rank actively trading USD-M perpetual USDT contracts by 24h quote turnover."""
     try:
-        exchange_info = _binance_get("/api/v3/exchangeInfo")
+        exchange_info = _binance_get("/fapi/v1/exchangeInfo")
         allowed = {x["symbol"] for x in exchange_info.get("symbols", [])
                    if x.get("status") == "TRADING" and x.get("quoteAsset") == "USDT"
-                   and x.get("isSpotTradingAllowed", True)}
-        tickers = _binance_get("/api/v3/ticker/24hr")
+                   and x.get("contractType") == "PERPETUAL"}
+        tickers = _binance_get("/fapi/v1/ticker/24hr")
         ranked = [(float(t.get("quoteVolume", 0)), t.get("symbol")) for t in tickers
                   if t.get("symbol") in allowed]
         return [sym for _vol, sym in sorted(ranked, reverse=True)[:max(1, limit)]]
     except Exception as exc:
-        print(f"[Eli Whale] Spot universe fetch failed: {exc}")
+        print(f"[Eli Whale] Futures universe fetch failed: {exc}")
         return []
 
 
 def fetch_binance_5m_volume_surge(symbol):
-    """Return last closed 5m quote volume, preceding-20 average, and price move %."""
+    """Return closed USD-M Futures 5m aggregated quote volume, prior avg, price move."""
     try:
-        klines = _binance_get("/api/v3/klines", {"symbol": symbol, "interval": "5m", "limit": 22})
+        klines = _binance_get("/fapi/v1/klines", {"symbol": symbol, "interval": "5m", "limit": 22})
         if not isinstance(klines, list) or len(klines) < 22:
             return None
-        # Last returned candle is normally still forming; use closed bars only.
-        latest = klines[-2]
+        latest = klines[-2]  # exclude in-progress candle
         baseline = klines[-22:-2]
-        volumes = [float(k[7]) for k in baseline]  # quote-asset volume
+        volumes = [float(k[7]) for k in baseline]  # quote-asset volume, USDT aggregated
         current_volume = float(latest[7])
         average = sum(volumes) / len(volumes) if volumes else 0.0
         open_price, close_price = float(latest[1]), float(latest[4])
         change_pct = (close_price / open_price - 1) * 100 if open_price > 0 else 0.0
         return current_volume, average, change_pct
     except Exception as exc:
-        print(f"[Eli Whale] Spot 5m volume fetch {symbol}: {exc}")
+        print(f"[Eli Whale] Futures 5m volume fetch {symbol}: {exc}")
         return None
 
 
@@ -1037,7 +1064,7 @@ def format_compact_number(value):
 
 def scan_eli_whale_once(symbols=None):
     """Spot-only volume scanner; spot APIs do not provide futures open interest."""
-    symbols = symbols if symbols is not None else fetch_binance_spot_universe()
+    symbols = symbols if symbols is not None else fetch_binance_futures_universe()
     for symbol in symbols or []:
         vol_data = fetch_binance_5m_volume_surge(symbol)
         if not vol_data:
@@ -1059,28 +1086,28 @@ def scan_eli_whale_once(symbols=None):
                 continue
             ELI_STATE["last_alert"][dedup_key] = candle_tag
         message = (
-            f"🐋 {ELI_WHALE_NAME} | Binance Spot Market\n"
+            f"🐋 {ELI_WHALE_NAME} | Binance USD-M Futures\n"
             f"{symbol}  {direction}\n"
             f"5m quote volume: {format_compact_number(quote_vol)} USDT "
             f"({vol_mult:.2f}x prior-20 avg)\n"
             f"5m price change: {price_change:+.2f}%\n"
             f"Price check: Binance {format_compact_number(binance_price)} | Bitpin {format_compact_number(bitpin_price)} | "
             f"difference {price_diff:.3f}% (max {PRICE_CHECK_TOLERANCE_PCT:.1f}%)\n"
-            "نوع: ردیاب اسپات حجم بازار؛ داده OI فیوچرز نیست و پیام سفارش معاملاتی محسوب نمی‌شود."
+            "منبع: حجم تجمیعی قراردادهای USD-M Futures؛ هشدار صرفاً اطلاعاتی است و سفارش خودکار نیست."
         )
         send_telegram(message)
 
 
 def run_eli_whale_tracker():
-    """Spot-market volume polling loop, isolated from the Bitpin scanner."""
-    print(f"{ELI_WHALE_NAME} Binance Spot tracker started.")
+    """USD-M futures volume polling loop, isolated from the Bitpin scanner."""
+    print(f"{ELI_WHALE_NAME} Binance USD-M Futures tracker started.")
     cached_universe, refreshed_at = [], 0.0
     while True:
         try:
             record_heartbeat("binance_tracker")
             now = time.time()
             if not cached_universe or now - refreshed_at >= 3600:
-                cached_universe = fetch_binance_spot_universe()
+                cached_universe = fetch_binance_futures_universe()
                 refreshed_at = now
             if cached_universe:
                 scan_eli_whale_once(cached_universe)
@@ -1099,19 +1126,20 @@ def telegram_stats_command_handler():
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
             r = requests.get(url, params={"offset": offset, "timeout": 25}, timeout=35)
             data = r.json() if r.status_code == 200 else {}
+            if not data.get("ok", False):
+                raise RuntimeError(f"Telegram getUpdates failed: HTTP {r.status_code}")
             for update in data.get("result", []):
                 offset = update["update_id"] + 1
                 msg = update.get("message") or {}
                 text = (msg.get("text") or "").strip()
                 chat_id = msg.get("chat", {}).get("id")
                 command = text.split()[0].split("@", 1)[0].lower() if text else ""
-                if command == "/status" and chat_id is not None:
+                if command in ("/status", "/health") and chat_id is not None:
                     status = get_health_status()
-                    report = ("🩺 وضعیت سلامت ربات: " + status["status"].upper() + "\n"
-                              + "تازگی داده‌ها (ثانیه):\n"
-                              + "Bitpin: " + str(status["data_freshness"]["bitpin"]["age_seconds"]) + "\n"
-                              + "Binance: " + str(status["data_freshness"]["binance"]["age_seconds"]) + "\n"
-                              + "Heartbeat: " + json.dumps(status["heartbeats"], ensure_ascii=False))
+                    report = ("🩺 سلامت: " + status["status"] + "\n"
+                              + "Bitpin: " + str(status["data_freshness"]["bitpin"]) + "\n"
+                              + "Binance USD-M: " + str(status["data_freshness"]["binance"]) + "\n"
+                              + "Heartbeats: " + json.dumps(status["heartbeats"], ensure_ascii=False))
                     try:
                         requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
                                       json={"chat_id": chat_id, "text": report}, timeout=10)
@@ -1206,7 +1234,7 @@ def run_scanner():
         "🚀 <b>ربات اسکنر بیت‌پین (حالت دیباگ) روشن شد!</b>\n\n"
         "✅ اتصال به تلگرام برقرار است.\n"
         " USDT 🔗 ارزهای پایه: \n"
-        "⏱ به محض رسیدن دقیقه ۰۱، اولین تست دریافت کندل انجام خواهد شد."
+        "⏱ اسکن دوره‌ای فعال است. فرمان‌ها: /status /stats /health"
     )
     send_telegram(test_msg)
 
