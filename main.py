@@ -889,66 +889,58 @@ def run_signal_tracker():
             print(f"[Tracker Loop Error] {e}")
 
 
-# ================= Category 2: Binance spot volume-surge tracker =================
+# ================= Category 2: Binance USD-M Futures AggTrades whale tracker =================
+# Public Binance USD-M futures market data only; this tracker does not place orders.
 ELI_WHALE_NAME = "الی نهنگ"
-ELI_WHALE_INTERVAL = int(os.getenv("ELI_WHALE_INTERVAL", "300"))
+ELI_WHALE_INTERVAL = int(os.getenv("ELI_WHALE_INTERVAL", "30"))
 ELI_WHALE_UNIVERSE_SIZE = int(os.getenv("ELI_WHALE_UNIVERSE_SIZE", "25"))
-ELI_VOLUME_SURGE_MULT = float(os.getenv("ELI_VOLUME_SURGE_MULT", "2.0"))
-ELI_MIN_5M_QUOTE_VOLUME = float(os.getenv("ELI_MIN_5M_QUOTE_VOLUME", "1000000"))
-ELI_STATE = {"last_alert": {}}
+ELI_MIN_WHALE_TRADE_USDT = float(os.getenv("ELI_MIN_WHALE_TRADE_USDT", "100000"))
+ELI_MIN_NET_WHALE_FLOW_USDT = float(os.getenv("ELI_MIN_NET_WHALE_FLOW_USDT", "500000"))
+ELI_MIN_FLOW_IMBALANCE = float(os.getenv("ELI_MIN_FLOW_IMBALANCE", "0.65"))
+ELI_LIMIT_PULLBACK_PCT = float(os.getenv("ELI_LIMIT_PULLBACK_PCT", "0.20"))
+ELI_STATE = {"symbols": {}}
 ELI_LOCK = threading.Lock()
+BINANCE_FUTURES_BASE = os.getenv("BINANCE_FUTURES_BASE", "https://fapi.binance.com").rstrip("/")
 
 
-def _binance_get(path, params=None, timeout=12):
-    """Fetch public spot data, rotating through configurable Binance API mirrors."""
-    errors = []
-    for base in BINANCE_SPOT_BASES:
-        try:
-            response = requests.get(base + path, params=params or {}, timeout=timeout,
-                                    headers={"User-Agent": "Mozilla/5.0"})
-            response.raise_for_status()
-            payload = response.json()
-            if isinstance(payload, dict) and payload.get("code") not in (None, 0):
-                raise ValueError(f"Binance API error: {payload}")
-            return payload
-        except Exception as exc:
-            errors.append(f"{base}: {exc}")
-    raise RuntimeError("All public Binance spot endpoints failed: " + " | ".join(errors))
+def _binance_futures_get(path, params=None, timeout=12):
+    """Fetch public USD-M futures data without changing the existing spot helper."""
+    response = requests.get(BINANCE_FUTURES_BASE + path, params=params or {}, timeout=timeout,
+                            headers={"User-Agent": "Mozilla/5.0"})
+    response.raise_for_status()
+    payload = response.json()
+    if isinstance(payload, dict) and payload.get("code") not in (None, 0):
+        raise ValueError(f"Binance Futures API error: {payload}")
+    return payload
 
 
-def fetch_binance_spot_universe(limit=ELI_WHALE_UNIVERSE_SIZE):
-    """Rank actively trading USDT spot pairs by 24-hour quote turnover."""
+def fetch_binance_futures_universe(limit=ELI_WHALE_UNIVERSE_SIZE):
+    """Rank active USDT-margined perpetual futures by 24-hour quote turnover."""
     try:
-        exchange_info = _binance_get("/api/v3/exchangeInfo")
-        allowed = {x["symbol"] for x in exchange_info.get("symbols", [])
-                   if x.get("status") == "TRADING" and x.get("quoteAsset") == "USDT"
-                   and x.get("isSpotTradingAllowed", True)}
-        tickers = _binance_get("/api/v3/ticker/24hr")
-        ranked = [(float(t.get("quoteVolume", 0)), t.get("symbol")) for t in tickers
-                  if t.get("symbol") in allowed]
-        return [sym for _vol, sym in sorted(ranked, reverse=True)[:max(1, limit)]]
+        info = _binance_futures_get("/fapi/v1/exchangeInfo")
+        allowed = {item["symbol"] for item in info.get("symbols", [])
+                   if item.get("status") == "TRADING"
+                   and item.get("contractType") == "PERPETUAL"
+                   and item.get("quoteAsset") == "USDT"}
+        tickers = _binance_futures_get("/fapi/v1/ticker/24hr")
+        ranked = [(float(item.get("quoteVolume", 0)), item.get("symbol"))
+                  for item in tickers if item.get("symbol") in allowed]
+        return [symbol for _volume, symbol in sorted(ranked, reverse=True)[:max(1, int(limit))]]
     except Exception as exc:
-        print(f"[Eli Whale] Spot universe fetch failed: {exc}")
+        print(f"[Eli Whale] Futures universe fetch failed: {exc}")
         return []
 
 
-def fetch_binance_5m_volume_surge(symbol):
-    """Return last closed 5m quote volume, preceding-20 average, and price move %."""
+def fetch_binance_futures_aggtrades(symbol, from_id=None):
+    """Fetch USD-M aggregate trades, optionally continuing from the last seen trade ID."""
+    params = {"symbol": symbol, "limit": 1000}
+    if from_id is not None:
+        params["fromId"] = int(from_id)
     try:
-        klines = _binance_get("/api/v3/klines", {"symbol": symbol, "interval": "5m", "limit": 22})
-        if not isinstance(klines, list) or len(klines) < 22:
-            return None
-        # Last returned candle is normally still forming; use closed bars only.
-        latest = klines[-2]
-        baseline = klines[-22:-2]
-        volumes = [float(k[7]) for k in baseline]  # quote-asset volume
-        current_volume = float(latest[7])
-        average = sum(volumes) / len(volumes) if volumes else 0.0
-        open_price, close_price = float(latest[1]), float(latest[4])
-        change_pct = (close_price / open_price - 1) * 100 if open_price > 0 else 0.0
-        return current_volume, average, change_pct
+        result = _binance_futures_get("/fapi/v1/aggTrades", params=params)
+        return result if isinstance(result, list) else []
     except Exception as exc:
-        print(f"[Eli Whale] Spot 5m volume fetch {symbol}: {exc}")
+        print(f"[Eli Whale] Futures aggTrades fetch {symbol}: {exc}")
         return None
 
 
@@ -958,54 +950,109 @@ def format_compact_number(value):
 
 
 def scan_eli_whale_once(symbols=None):
-    """Spot-only volume scanner; spot APIs do not provide futures open interest."""
-    symbols = symbols if symbols is not None else fetch_binance_spot_universe()
+    """Aggregate large aggressive futures trades and alert on dominant net taker flow."""
+    symbols = symbols if symbols is not None else fetch_binance_futures_universe()
+    interval = max(60, ELI_WHALE_INTERVAL)
+    bucket = int(time.time() // interval)
     for symbol in symbols or []:
-        vol_data = fetch_binance_5m_volume_surge(symbol)
-        if not vol_data:
-            continue
-        quote_vol, avg_vol, price_change = vol_data
-        vol_mult = quote_vol / avg_vol if avg_vol > 0 else 0.0
-        if quote_vol < ELI_MIN_5M_QUOTE_VOLUME or vol_mult < ELI_VOLUME_SURGE_MULT:
-            continue
-        direction = "LONG" if price_change >= 0 else "SHORT"
-        market_code = symbol[:-4] + "_USDT" if symbol.endswith("USDT") else symbol
-        price_ok, bitpin_price, binance_price, price_diff = compare_binance_bitpin_price(
-            market_code, binance_symbol=symbol)
-        if not price_ok:
-            continue
-        candle_tag = int(time.time() // max(60, ELI_WHALE_INTERVAL))
-        dedup_key = (symbol, direction)
         with ELI_LOCK:
-            if ELI_STATE["last_alert"].get(dedup_key) == candle_tag:
+            previous = ELI_STATE["symbols"].get(symbol, {})
+            from_id = previous.get("last_id")
+        trades = fetch_binance_futures_aggtrades(symbol, from_id=from_id)
+        if trades is None:
+            continue
+        with ELI_LOCK:
+            state = ELI_STATE["symbols"].setdefault(symbol, {
+                "last_id": None, "bucket": bucket, "buy": 0.0, "sell": 0.0,
+                "buy_count": 0, "sell_count": 0, "last_alert": None,
+            })
+            if state.get("bucket") != bucket:
+                state.update({"bucket": bucket, "buy": 0.0, "sell": 0.0,
+                              "buy_count": 0, "sell_count": 0, "last_alert": None})
+            for trade in trades:
+                try:
+                    trade_id = int(trade["a"])
+                    price, quantity = float(trade["p"]), float(trade["q"])
+                    trade_time = int(trade["T"])
+                    notional = price * quantity
+                except (KeyError, TypeError, ValueError, IndexError):
+                    continue
+                state["last_id"] = max(trade_id, state["last_id"] or trade_id)
+                if trade_time // (interval * 1000) != bucket or notional < ELI_MIN_WHALE_TRADE_USDT:
+                    continue
+                # Binance m=True means buyer was maker, i.e. aggressive taker sold.
+                if bool(trade.get("m", False)):
+                    state["sell"] += notional
+                    state["sell_count"] += 1
+                else:
+                    state["buy"] += notional
+                    state["buy_count"] += 1
+            buy_flow, sell_flow = state["buy"], state["sell"]
+            total_flow = buy_flow + sell_flow
+            if total_flow <= 0:
                 continue
-            ELI_STATE["last_alert"][dedup_key] = candle_tag
+            direction = "LONG" if buy_flow >= sell_flow else "SHORT"
+            dominant_flow = max(buy_flow, sell_flow)
+            net_flow = abs(buy_flow - sell_flow)
+            imbalance = dominant_flow / total_flow
+            if (net_flow < ELI_MIN_NET_WHALE_FLOW_USDT
+                    or imbalance < ELI_MIN_FLOW_IMBALANCE
+                    or state.get("last_alert") == (bucket, direction)):
+                continue
+            state["last_alert"] = (bucket, direction)
+
+        try:
+            futures_payload = _binance_futures_get(
+                "/fapi/v1/ticker/price", params={"symbol": symbol}, timeout=8)
+            futures_price = float(futures_payload["price"])
+            market_code = symbol[:-4] + "_USDT" if symbol.endswith("USDT") else symbol
+            bitpin_price = fetch_bitpin_ticker_price(market_code)
+            if (bitpin_price is None or not math.isfinite(futures_price)
+                    or futures_price <= 0 or bitpin_price <= 0):
+                continue
+            price_diff = abs(bitpin_price - futures_price) / futures_price * 100.0
+            if price_diff > PRICE_CHECK_TOLERANCE_PCT:
+                print(f"[Eli Whale] {symbol} blocked by price check: futures={futures_price}, "
+                      f"Bitpin={bitpin_price}, difference={price_diff:.4f}%")
+                continue
+        except Exception as exc:
+            print(f"[Eli Whale] Futures price check failed for {symbol}: {exc}")
+            continue
+
+        pullback = ELI_LIMIT_PULLBACK_PCT / 100.0
+        limit_price = futures_price * (1.0 - pullback if direction == "LONG" else 1.0 + pullback)
+        buy_count, sell_count = state["buy_count"], state["sell_count"]
         message = (
-            f"🐋 {ELI_WHALE_NAME} | Binance Spot Market\n"
+            f"🐋 {ELI_WHALE_NAME} | Binance USD-M Futures AggTrades\n"
             f"{symbol}  {direction}\n"
-            f"5m quote volume: {format_compact_number(quote_vol)} USDT "
-            f"({vol_mult:.2f}x prior-20 avg)\n"
-            f"5m price change: {price_change:+.2f}%\n"
-            f"Price check: Binance {format_compact_number(binance_price)} | Bitpin {format_compact_number(bitpin_price)} | "
-            f"difference {price_diff:.3f}% (max {PRICE_CHECK_TOLERANCE_PCT:.1f}%)\n"
-            "نوع: ردیاب اسپات حجم بازار؛ داده OI فیوچرز نیست و پیام سفارش معاملاتی محسوب نمی‌شود."
+            f"Large taker flow (>= {format_compact_number(ELI_MIN_WHALE_TRADE_USDT)} USDT/trade):\n"
+            f"Aggressive buys: {format_compact_number(buy_flow)} USDT ({buy_count} trades) | "
+            f"sells: {format_compact_number(sell_flow)} USDT ({sell_count} trades)\n"
+            f"Net flow: {format_compact_number(net_flow)} USDT | imbalance: {imbalance:.1%}\n"
+            f"Split entry suggestion (not an order): 50% MARKET near {format_compact_number(futures_price)}; "
+            f"50% LIMIT pullback at {format_compact_number(limit_price)} "
+            f"({ELI_LIMIT_PULLBACK_PCT:.2f}% from market)\n"
+            f"Price check: Futures {format_compact_number(futures_price)} | "
+            f"Bitpin {format_compact_number(bitpin_price)} | difference {price_diff:.3f}% "
+            f"(max {PRICE_CHECK_TOLERANCE_PCT:.1f}%)\n"
+            "این پیام صرفاً هشدار دادهٔ عمومی فیوچرز و پیشنهاد تقسیم ورود است؛ هیچ سفارشی ثبت نمی‌کند."
         )
         send_telegram(message)
 
 
 def run_eli_whale_tracker():
-    """Spot-market volume polling loop, isolated from the Bitpin scanner."""
-    print(f"{ELI_WHALE_NAME} Binance Spot tracker started.")
+    """USD-M futures AggTrades polling loop; compatible with the existing thread target."""
+    print(f"{ELI_WHALE_NAME} Binance USD-M Futures AggTrades tracker started.")
     cached_universe, refreshed_at = [], 0.0
     while True:
         try:
             now = time.time()
             if not cached_universe or now - refreshed_at >= 3600:
-                cached_universe = fetch_binance_spot_universe()
+                cached_universe = fetch_binance_futures_universe()
                 refreshed_at = now
             if cached_universe:
                 scan_eli_whale_once(cached_universe)
-            time.sleep(max(60, ELI_WHALE_INTERVAL))
+            time.sleep(max(10, ELI_WHALE_INTERVAL))
         except Exception as exc:
             print(f"[Eli Whale Loop Error] {exc}")
             time.sleep(30)
