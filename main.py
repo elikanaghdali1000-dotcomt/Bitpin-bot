@@ -25,7 +25,7 @@ BINANCE_SPOT_BASES = tuple(
         "https://data-api.binance.vision,https://api.binance.com,https://www.binance.com"
     ).split(",") if base.strip()
 )
-PRICE_CHECK_TOLERANCE_PCT = float(os.getenv("PRICE_CHECK_TOLERANCE_PCT", 1.0))
+PRICE_CHECK_TOLERANCE_PCT = float(os.getenv("PRICE_CHECK_TOLERANCE_PCT", 1.5))
 OHLC_URL = f"{BASE_API}/v1/mkt/candles/"
 
 BB_PERIOD = int(os.getenv("BB_PERIOD", 20))
@@ -35,7 +35,7 @@ BITPIN_ENTRY_FEE_RATE = float(os.getenv("BITPIN_ENTRY_FEE_RATE", 0.001))
 BITPIN_EXIT_FEE_RATE = float(os.getenv("BITPIN_EXIT_FEE_RATE", 0.001))
 ESTIMATED_ROUND_TRIP_FEE = BITPIN_ENTRY_FEE_RATE + BITPIN_EXIT_FEE_RATE
 NET_PROFIT_UNITS = float(os.getenv("NET_PROFIT_UNITS", 1.0))
-BOLLINGER_SQUEEZE_THRESHOLD = float(os.getenv("BOLLINGER_SQUEEZE_THRESHOLD", 1.6))
+BOLLINGER_SQUEEZE_THRESHOLD = float(os.getenv("BOLLINGER_SQUEEZE_THRESHOLD", 1.1))
 TRACKER_FILE = os.getenv("TRACKER_FILE", "signal_tracker.json")
 TIMEFRAME = os.getenv("TIMEFRAME", "15")
 
