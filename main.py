@@ -66,12 +66,12 @@ MARGIN_SYMBOLS = [
     "TON_USDT", "GALA_USDT", "FTM_USDT", "SAND_USDT", "MANA_USDT"
 ]
 
-# وضعیت سلامت سیستم
+# وضعیت سلامت و نظارت سیستم
 system_health = {
     "boot_time": datetime.now(timezone.utc),
     "last_successful_scan": None,
-    "last_bitpin_status": "Unknown",
-    "last_binance_status": "Unknown",
+    "last_bitpin_status": "Starting...",
+    "last_binance_status": "Starting...",
     "scan_count": 0,
     "signals_sent": 0
 }
@@ -91,6 +91,7 @@ class SimpleHandler(BaseHTTPRequestHandler):
             "last_scan": str(system_health["last_successful_scan"]),
             "bitpin": system_health["last_bitpin_status"],
             "binance": system_health["last_binance_status"],
+            "scans_completed": system_health["scan_count"],
             "signals_sent": system_health["signals_sent"]
         }
         self.wfile.write(json.dumps(resp, ensure_ascii=False).encode("utf-8"))
@@ -138,7 +139,6 @@ def send_telegram(text, parse_mode="HTML"):
 # 4. واکشی داده‌های بازار (بیت‌پین و بایننس)
 # ==========================================
 def _binance_get(path, params=None, timeout=8):
-    """واکشی از میرورهای اسپات بایننس با امکان فال‌بک."""
     last_err = None
     for base in BINANCE_SPOT_BASES:
         try:
@@ -191,23 +191,38 @@ def compare_binance_bitpin_price(market_code, bitpin_price=None, binance_symbol=
         return passed, bitpin, binance, diff_pct
     except Exception as exc:
         print(f"[Price Check Fallback] {market_code}: {exc}")
-        # اگر بایننس کاملاً قطع بود، اجازه عبور محتاطانه با قیمت بیت‌پین
         return True, bitpin, None, 0.0
 
-def fetch_bitpin_candles(symbol, resolution="15", count=300):
-    url = f"{OHLC_URL}?symbol={symbol}&resolution={resolution}&count={count}"
+def fetch_bitpin_candles(symbol, resolution="15", count=120):
+    res_str = f"{resolution}m" if str(resolution).isdigit() else str(resolution)
+    now = int(time.time())
+    minutes = int(res_str[:-1]) if res_str.endswith("m") else 15
+    from_time = now - (count * minutes * 60)
+    
+    params = {
+        "symbol": symbol,
+        "from": from_time,
+        "to": now,
+        "res": res_str,
+    }
     try:
-        res = requests.get(url, timeout=10)
+        res = requests.get(OHLC_URL, params=params, timeout=10)
         if res.status_code == 200:
+            system_health["last_bitpin_status"] = "OK"
             data = res.json()
             if isinstance(data, list) and len(data) > 0:
                 df = pd.DataFrame(data)
-                cols = {"open": "open", "high": "high", "low": "low", "close": "close", "volume": "volume"}
+                cols = ["open", "high", "low", "close", "volume"]
                 for k in cols:
                     if k in df.columns:
                         df[k] = pd.to_numeric(df[k], errors="coerce")
                 return df.dropna().reset_index(drop=True)
+            else:
+                system_health["last_bitpin_status"] = "Empty Candle List"
+        else:
+            system_health["last_bitpin_status"] = f"HTTP {res.status_code}"
     except Exception as e:
+        system_health["last_bitpin_status"] = f"Candle Error: {e}"
         print(f"[Candles Error] {symbol}: {e}")
     return None
 
@@ -274,6 +289,7 @@ def format_price(p):
 def build_signal(symbol, direction, strategy_name, entry, sl, tp1, tp2=None):
     passed, bitpin_p, binance_p, diff = compare_binance_bitpin_price(symbol, bitpin_price=entry)
     if not passed:
+        print(f"[Filter Rejected] {symbol}: Price diff with Binance is {diff:.2f}% (Limit: {PRICE_CHECK_TOLERANCE_PCT}%)")
         return None
 
     entry_clean = bitpin_p or entry
@@ -299,14 +315,13 @@ def build_signal(symbol, direction, strategy_name, entry, sl, tp1, tp2=None):
     return text
 
 # ==========================================
-# 7. استراتژی‌های معاملاتی
+# 7. استراتژی‌های معاملاتی (حفظ دقیق منطق شما روی کندل آخر)
 # ==========================================
 def check_sensi_strategy(df, symbol, is_margin=True):
     if df is None or len(df) < 55: return None
     row = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # فیلتر حجم مرده
     recent_vol = df["volume"].iloc[-SENSI_DEAD_VOLUME_STREAK:]
     avg_vol = df["vol_ma20"].iloc[-1]
     if (recent_vol < (avg_vol * SENSI_DEAD_VOLUME_RATIO)).all():
@@ -314,7 +329,6 @@ def check_sensi_strategy(df, symbol, is_margin=True):
 
     c, o, h, l = row["close"], row["open"], row["high"], row["low"]
     
-    # بازگشت صعودی
     if prev["close"] <= prev["bb_lower"] and c > o and c > prev["high"]:
         entry = c
         sl = bollinger_stop("LONG", row)
@@ -322,7 +336,6 @@ def check_sensi_strategy(df, symbol, is_margin=True):
         tp2 = risk_target(entry, sl, "LONG", rr=2.5)
         return "LONG", "بازگشت سنسی", entry, sl, tp1, tp2
 
-    # بازگشت نزولی
     if is_margin and prev["close"] >= prev["bb_upper"] and c < o and c < prev["low"]:
         entry = c
         sl = bollinger_stop("SHORT", row)
@@ -382,17 +395,19 @@ def register_and_send(symbol, direction, strategy_name, entry, sl, tp1, tp2=None
     
     if dedup_key in recent_signals_cache:
         last_time = recent_signals_cache[dedup_key]
-        if (now - last_time).total_seconds() < 3600: # جلوگیری از ارسال تکراری تا ۱ ساعت
+        if (now - last_time).total_seconds() < 3600:
             return
 
     msg = build_signal(symbol, direction, strategy_name, entry, sl, tp1, tp2)
     if msg and send_telegram(msg):
         recent_signals_cache[dedup_key] = now
         system_health["signals_sent"] += 1
-        print(f"[SIGNAL SENT] {symbol} {direction} via {strategy_name}")
+        print(f"\n=======================================================")
+        print(f"🚀 [SIGNAL SENT] {symbol} {direction} via {strategy_name}")
+        print(f"=======================================================\n")
 
 # ==========================================
-# 9. بررسی پیام‌ها و دستورات تلگرام (/stats, /ping)
+# 9. دستورات تعاملی تلگرام (/ping و /stats)
 # ==========================================
 def telegram_command_handler():
     offset = 0
@@ -401,7 +416,7 @@ def telegram_command_handler():
             if not TELEGRAM_BOT_TOKEN:
                 time.sleep(10); continue
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-            r = requests.get(url, params={"offset": offset, "timeout": 20}, timeout=30)
+            r = requests.get(url, params={"offset": offset, "timeout": 20}, timeout=25)
             if r.status_code == 200:
                 data = r.json()
                 for update in data.get("result", []):
@@ -417,93 +432,95 @@ def telegram_command_handler():
                         uptime = str(datetime.now(timezone.utc) - system_health["boot_time"]).split(".")[0]
                         res = (
                             f"🏓 <b>ربات کاملاً آنلاین و فعال است!</b>\n\n"
-                            f"⏱ <b>Uptime:</b> {uptime}\n"
-                            f"📡 <b>اتصال بیت‌پین:</b> {system_health['last_bitpin_status']}\n"
-                            f"🌐 <b>اتصال بایننس:</b> {system_health['last_binance_status']}\n"
-                            f"🔄 <b>تعداد اسکن‌ها:</b> {system_health['scan_count']}\n"
-                            f"🎯 <b>سیگنال‌های ارسالی:</b> {system_health['signals_sent']}\n"
-                            f"🕒 <b>آخرین اسکن موفق:</b> {system_health['last_successful_scan'] or 'درحال انجام...'}"
+                            f"⏱ <b>مدت زمان آنلاین:</b> {uptime}\n"
+                            f"📡 <b>اتصال بیت‌پین:</b> <code>{system_health['last_bitpin_status']}</code>\n"
+                            f"🌐 <b>اتصال بایننس:</b> <code>{system_health['last_binance_status']}</code>\n"
+                            f"🔄 <b>تعداد چرخه‌های اسکن:</b> <code>{system_health['scan_count']}</code>\n"
+                            f"🎯 <b>سیگنال‌های صادرشده:</b> <code>{system_health['signals_sent']}</code>\n"
+                            f"🕒 <b>آخرین اسکن موفق:</b> <code>{system_health['last_successful_scan'] or 'درحال اجرا...'}</code>"
                         )
                         send_telegram(res)
 
                     elif text == "/stats":
                         res = (
-                            f"📊 <b>آمار سیگنال‌دهی ربات:</b>\n\n"
-                            f"کل سیگنال‌های این اجرا: <b>{system_health['signals_sent']}</b>\n"
-                            f"ارزهای تحت نظر: <b>{len(MARGIN_SYMBOLS)} جفت‌ارز مارجین</b>\n"
-                            f"تایم فریم تحلیل: <b>{TIMEFRAME} دقیقه</b>"
+                            f"📊 <b>آمار سیستم اسکنر:</b>\n\n"
+                            f"🔹 کل سیگنال‌ها: <b>{system_health['signals_sent']}</b>\n"
+                            f"🔹 جفت‌ارزهای تحت پایش: <b>{len(MARGIN_SYMBOLS)} نماد تعهدی</b>\n"
+                            f"🔹 تایم فریم فعلی: <b>{TIMEFRAME} دقیقه</b>"
                         )
                         send_telegram(res)
-
-        except Exception as e:
+        except Exception:
             time.sleep(5)
         time.sleep(2)
 
 # ==========================================
-# 10. گزارش سلامت دوره‌ای (Heartbeat خودکار هر ۱ ساعت)
+# 10. گزارش سلامت خودکار (Heartbeat هر ۱ ساعت)
 # ==========================================
 def hourly_heartbeat():
     while True:
         try:
-            time.sleep(3600)  # هر ۱ ساعت یکبار
+            time.sleep(3600)
             uptime = str(datetime.now(timezone.utc) - system_health["boot_time"]).split(".")[0]
             msg = (
-                f"💓 <b>گزارش سلامت خودکار ربات (Heartbeat)</b>\n\n"
-                f"✅ سرور و اسکنر فعال هستند.\n"
-                f"⏳ مدت زمان روشن بودن: {uptime}\n"
+                f"💓 <b>گزارش دوره‌ای ربات (Heartbeat)</b>\n\n"
+                f"✅ اسکنر و سیستم مانیتورینگ کاملاً فعال هستند.\n"
+                f"⏱ مدت زمان روشن بودن: {uptime}\n"
                 f"📡 وضعیت وب‌سرویس بیت‌پین: <code>{system_health['last_bitpin_status']}</code>\n"
-                f"🌐 وضعیت وب‌سرویس بایننس: <code>{system_health['last_binance_status']}</code>\n"
-                f"🎯 مجموع سیگنال‌های صادرشده: <b>{system_health['signals_sent']}</b>"
+                f"🔄 دورهای اسکن انجام‌شده: <b>{system_health['scan_count']}</b>\n"
+                f"🎯 سیگنال‌های موفق: <b>{system_health['signals_sent']}</b>"
             )
             send_telegram(msg)
         except Exception:
             pass
 
 # ==========================================
-# 11. حلقه اصلی اسکنر بازار
+# 11. حلقه اصلی اسکنر بازار با لاگ زنده پیشرفت
 # ==========================================
 def run_scanner():
     print("Market scanner started successfully.")
     start_msg = (
         "🚀 <b>ربات تحلیل‌گر بیت‌پین با موفقیت راه‌اندازی شد!</b>\n\n"
-        f"✅ پایش {len(MARGIN_SYMBOLS)} جفت‌ارز تعهدی (مارجین)\n"
-        "✅ ماژول سلامت و دستورات تلگرام فعال شد.\n"
-        "💡 می‌توانید برای اطمینان دستور <code>/ping</code> را ارسال کنید."
+        f"✅ پایش زنده <b>{len(MARGIN_SYMBOLS)}</b> نماد معاملاتی تعهدی\n"
+        f"⏱ تایم‌فریم: <b>{TIMEFRAME} دقیقه</b>\n"
+        "💡 برای بررسی وضعیت سلامت و ارتباط ربات، دستور <code>/ping</code> را ارسال کنید."
     )
     send_telegram(start_msg)
 
     while True:
         try:
+            print(f"\n--- [Cycle #{system_health['scan_count'] + 1}] Starting scan of {len(MARGIN_SYMBOLS)} pairs ---")
+            
             for symbol in MARGIN_SYMBOLS:
                 df = fetch_bitpin_candles(symbol, resolution=TIMEFRAME, count=100)
                 if df is not None and not df.empty:
                     df_ind = calculate_indicators(df)
                     if df_ind is not None:
-                        # بررسی فشردگی بولینگر
-                        if df_ind.iloc[-1]["bandwidth"] < BOLLINGER_SQUEEZE_THRESHOLD:
-                            time.sleep(0.2); continue
+                        last_c = df_ind.iloc[-1]["close"]
+                        # لاگ زنده در کنسول Render
+                        print(f"[OK] Analyzed {symbol:11s} | Candles: {len(df_ind)} | Close: {last_c}")
+
+                        # فیلتر فشردگی بولینگر
+                        if BOLLINGER_SQUEEZE_THRESHOLD > 0 and df_ind.iloc[-1]["bandwidth"] < BOLLINGER_SQUEEZE_THRESHOLD:
+                            time.sleep(0.15); continue
 
                         # بررسی استراتژی‌ها
-                        res_sensi = check_sensi_strategy(df_ind, symbol, is_margin=True)
-                        if res_sensi:
-                            d, st, e, sl, tp1, tp2 = res_sensi
-                            register_and_send(symbol, d, st, e, sl, tp1, tp2)
+                        for strat_func in [check_sensi_strategy, check_trend_strategy, check_pullback_strategy]:
+                            res = strat_func(df_ind, symbol, is_margin=True)
+                            if res:
+                                d, st, e, sl, tp1, tp2 = res
+                                print(f">>> SIGNAL FOUND! [{symbol}] [{d}] via [{st}] @ {e}")
+                                register_and_send(symbol, d, st, e, sl, tp1, tp2)
+                    else:
+                        print(f"[Skip] {symbol}: Not enough rows for indicators (<55)")
+                else:
+                    print(f"[Warn] {symbol}: No candle data returned from Bitpin")
 
-                        res_trend = check_trend_strategy(df_ind, symbol, is_margin=True)
-                        if res_trend:
-                            d, st, e, sl, tp1, tp2 = res_trend
-                            register_and_send(symbol, d, st, e, sl, tp1, tp2)
-
-                        res_pullback = check_pullback_strategy(df_ind, symbol, is_margin=True)
-                        if res_pullback:
-                            d, st, e, sl, tp1, tp2 = res_pullback
-                            register_and_send(symbol, d, st, e, sl, tp1, tp2)
-
-                time.sleep(0.25)
+                time.sleep(0.2)
 
             system_health["last_successful_scan"] = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
             system_health["scan_count"] += 1
-            time.sleep(15)  # استراحت کوتاه بین چرخه‌های کامل بازار
+            print(f"--- [Cycle Finished] Total scans: {system_health['scan_count']} ---")
+            time.sleep(15)
 
         except Exception as e:
             print(f"[Scanner Loop Error] {e}")
@@ -513,14 +530,14 @@ def run_scanner():
 # 12. نقطه اجرای اصلی برنامه
 # ==========================================
 if __name__ == "__main__":
-    # ۱. وب‌سرور برای Render
+    # ۱. وب‌سرور جهت زنده ماندن در Render
     threading.Thread(target=run_http_server, daemon=True).start()
-    # ۲. جلوگیری از خاموشی سرور رایگان
+    # ۲. پینگ خودکار
     threading.Thread(target=self_ping, daemon=True).start()
-    # ۳. مدیریت پیام‌ها و دستورات تلگرام (/ping و /stats)
+    # ۳. دریافت پیام‌ها و دستورات تلگرام (/ping و /stats)
     threading.Thread(target=telegram_command_handler, daemon=True).start()
-    # ۴. ارسال گزارش سلامت ساعتی
+    # ۴. ارسال گزارش دوره‌ای ساعت به ساعت در تلگرام
     threading.Thread(target=hourly_heartbeat, daemon=True).start()
     
-    # ۵. اجرای حلقه اسکن در ریسه اصلی
+    # ۵. اجرای اسکنر بازار در ریسه اصلی
     run_scanner()
