@@ -8,96 +8,8 @@ import uuid
 import requests
 import pandas as pd
 import threading
-import logging
-from logging.handlers import RotatingFileHandler
 from datetime import datetime, timedelta, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
-
-# Heartbeat/data-freshness monitoring. All thresholds can be overridden in the environment.
-LOG_FILE = os.getenv("BOT_LOG_FILE", "bitpin_whale_bot.log")
-HEARTBEAT_LOG_INTERVAL = max(30, int(os.getenv("HEARTBEAT_LOG_INTERVAL", "300")))
-BITPIN_DATA_STALE_SECONDS = max(60, int(os.getenv("BITPIN_DATA_STALE_SECONDS", "1800")))
-BINANCE_DATA_STALE_SECONDS = max(60, int(os.getenv("BINANCE_DATA_STALE_SECONDS", "900")))
-COMPONENT_STALE_SECONDS = max(60, int(os.getenv("COMPONENT_STALE_SECONDS", "900")))
-_LOG = logging.getLogger("bitpin_whale_bot")
-_LOG.setLevel(logging.INFO)
-_LOG_FORMAT = logging.Formatter("%(asctime)sZ %(levelname)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%S")
-_LOG_FORMAT.converter = time.gmtime
-try:
-    _file_handler = RotatingFileHandler(LOG_FILE, maxBytes=5_000_000, backupCount=3, encoding="utf-8")
-    _file_handler.setFormatter(_LOG_FORMAT)
-    _LOG.addHandler(_file_handler)
-except Exception as _log_exc:
-    print(f"[Logging] Could not open {LOG_FILE}: {_log_exc}; using console only.")
-_console_handler = logging.StreamHandler()
-_console_handler.setFormatter(_LOG_FORMAT)
-_LOG.addHandler(_console_handler)
-
-_HEALTH_LOCK = threading.RLock()
-_HEALTH = {"data": {}, "components": {}, "counters": {"bitpin_ok": 0, "bitpin_error": 0, "binance_ok": 0, "binance_error": 0}}
-
-def _utc_iso(ts=None):
-    return datetime.fromtimestamp(ts if ts is not None else time.time(), timezone.utc).isoformat()
-
-def heartbeat(component, detail=None):
-    with _HEALTH_LOCK:
-        _HEALTH["components"][component] = {"at": time.time(), "detail": str(detail)[:240] if detail else None}
-
-def record_data(source, item=None, candle_ts=None):
-    now = time.time()
-    record = {"at": now, "item": item}
-    if candle_ts is not None:
-        try:
-            ct = float(candle_ts)
-            if ct > 10**12:  # exchange timestamps may be milliseconds
-                ct /= 1000.0
-            record["candle_at"] = ct
-            record["candle_age_seconds"] = max(0.0, now - ct)
-        except (TypeError, ValueError, OverflowError):
-            pass
-    with _HEALTH_LOCK:
-        _HEALTH["data"][source] = record
-        key = "bitpin_ok" if source == "bitpin" else "binance_ok"
-        _HEALTH["counters"][key] += 1
-
-def record_data_error(source, detail=None):
-    with _HEALTH_LOCK:
-        _HEALTH["counters"]["bitpin_error" if source == "bitpin" else "binance_error"] += 1
-    _LOG.warning("%s data request failed%s", source, f": {detail}" if detail else "")
-
-def health_snapshot():
-    now = time.time()
-    with _HEALTH_LOCK:
-        data = {k: dict(v) for k, v in _HEALTH["data"].items()}
-        components = {k: dict(v) for k, v in _HEALTH["components"].items()}
-        counters = dict(_HEALTH["counters"])
-    freshness = {}
-    for source, limit in (("bitpin", BITPIN_DATA_STALE_SECONDS), ("binance", BINANCE_DATA_STALE_SECONDS)):
-        rec = data.get(source)
-        age = now - rec["at"] if rec else None
-        candle_age = now - rec["candle_at"] if rec and rec.get("candle_at") else None
-        fresh = age is not None and age <= limit and (candle_age is None or candle_age <= limit * 2)
-        freshness[source] = {"fresh": bool(fresh), "seconds_since_success": round(age, 1) if age is not None else None,
-                             "seconds_since_latest_candle": round(candle_age, 1) if candle_age is not None else None,
-                             "threshold_seconds": limit, "last_item": rec.get("item") if rec else None}
-    component_status = {k: {"alive": now-v["at"] <= COMPONENT_STALE_SECONDS,
-                            "seconds_since_heartbeat": round(now-v["at"], 1), "detail": v.get("detail")}
-                        for k, v in components.items()}
-    status = "ok" if all(x["fresh"] for x in freshness.values()) and all(x["alive"] for x in component_status.values()) else "degraded"
-    return {"status": status, "checked_at": _utc_iso(now), "data_freshness": freshness,
-            "components": component_status, "request_counters": counters, "log_file": LOG_FILE}
-
-def monitor_heartbeats():
-    while True:
-        try:
-            snap = health_snapshot()
-            _LOG.info("Heartbeat status=%s data=%s components=%s counts=%s", snap["status"],
-                      json.dumps(snap["data_freshness"], ensure_ascii=False, sort_keys=True),
-                      json.dumps(snap["components"], ensure_ascii=False, sort_keys=True), snap["request_counters"])
-            time.sleep(HEARTBEAT_LOG_INTERVAL)
-        except Exception:
-            _LOG.exception("Heartbeat monitor error")
-            time.sleep(30)
 
 # ================= تنظیمات اصلی و اطلاعات اختصاصی =================
 TELEGRAM_BOT_TOKEN = "8947033412:AAEPvb8CEn5I_9Bxe8oqPuGD1gNjfY5TrUA"
@@ -112,7 +24,7 @@ BINANCE_SPOT_BASES = tuple(
         "https://data-api.binance.vision,https://api.binance.com,https://www.binance.com"
     ).split(",") if base.strip()
 )
-PRICE_CHECK_TOLERANCE_PCT = float(os.getenv("PRICE_CHECK_TOLERANCE_PCT", "1.0"))
+PRICE_CHECK_TOLERANCE_PCT = float(os.getenv("PRICE_CHECK_TOLERANCE_PCT", "2.5"))
 OHLC_URL = f"{BASE_API}/v1/mkt/candles/"  # اندپوینت رسمی بیت‌پین
 
 BB_PERIOD = 20
@@ -126,7 +38,7 @@ ESTIMATED_ROUND_TRIP_FEE = float(os.getenv(
     str(BITPIN_ENTRY_FEE_RATE + BITPIN_EXIT_FEE_RATE)))
 # P&L amount is expressed in quote currency for this many units of the asset.
 NET_PROFIT_UNITS = float(os.getenv("NET_PROFIT_UNITS", "1.0"))
-BOLLINGER_SQUEEZE_THRESHOLD = 1.75  # درصد؛ کمتر از این مقدار سیگنال مسدود می‌شود
+BOLLINGER_SQUEEZE_THRESHOLD = float(os.getenv("BOLLINGER_SQUEEZE_THRESHOLD", "1.0"))  # درصد
 TRACKER_FILE = os.getenv("SIGNAL_TRACKER_FILE", "signal_tracker.json")
 
 TIMEFRAME = "15"      # تایم‌فریم ۱۵ دقیقه
@@ -164,27 +76,83 @@ MARGIN_SYMBOLS = [
     'BTC_USDT', 'ALGO_USDT', 'DASH_USDT', 'PUMP_USDT', 'LDO_USDT',
 ]
 
+# ================= سلامت، تازگی داده و heartbeat =================
+HEALTH_LOCK = threading.RLock()
+DATA_FRESHNESS_LIMITS = {
+    "bitpin": float(os.getenv("BITPIN_DATA_STALE_SECONDS", "1800")),
+    "binance": float(os.getenv("BINANCE_DATA_STALE_SECONDS", "900")),
+}
+HEALTH_STATE = {
+    "started_at": time.time(), "heartbeats": {},
+    "data": {"bitpin": {"last_success": None, "last_error": None, "source": None},
+             "binance": {"last_success": None, "last_error": None, "source": None}},
+}
+
+def record_heartbeat(name):
+    with HEALTH_LOCK:
+        HEALTH_STATE["heartbeats"][name] = time.time()
+
+def record_data_event(exchange, success, source=None, error=None):
+    with HEALTH_LOCK:
+        item = HEALTH_STATE["data"][exchange]
+        if success:
+            item["last_success"] = time.time()
+            item["source"] = source
+            item["last_error"] = None
+        elif error:
+            item["last_error"] = str(error)[:300]
+
+def _age_seconds(timestamp, now):
+    return None if timestamp is None else max(0.0, now - timestamp)
+
+def get_health_status():
+    now = time.time()
+    with HEALTH_LOCK:
+        data = json.loads(json.dumps(HEALTH_STATE["data"]))
+        heartbeats = dict(HEALTH_STATE["heartbeats"])
+        started_at = HEALTH_STATE["started_at"]
+    exchanges = {}
+    for name, item in data.items():
+        age = _age_seconds(item["last_success"], now)
+        limit = DATA_FRESHNESS_LIMITS[name]
+        exchanges[name] = {
+            "ok": age is not None and age <= limit,
+            "last_success_utc": datetime.fromtimestamp(item["last_success"], timezone.utc).isoformat() if item["last_success"] else None,
+            "age_seconds": round(age, 1) if age is not None else None,
+            "stale_after_seconds": limit, "source": item["source"], "last_error": item["last_error"],
+        }
+    heartbeat_status = {}
+    for name, stamp in heartbeats.items():
+        age = _age_seconds(stamp, now)
+        heartbeat_status[name] = {"ok": age is not None and age <= float(os.getenv("HEARTBEAT_STALE_SECONDS", "300")),
+                                  "age_seconds": round(age, 1) if age is not None else None,
+                                  "last_seen_utc": datetime.fromtimestamp(stamp, timezone.utc).isoformat()}
+    hb_ok = bool(heartbeat_status) and all(v["ok"] for v in heartbeat_status.values())
+    healthy = all(v["ok"] for v in exchanges.values()) and hb_ok
+    return {"status": "healthy" if healthy else "degraded", "healthy": healthy,
+            "generated_at_utc": datetime.fromtimestamp(now, timezone.utc).isoformat(),
+            "uptime_seconds": round(now - started_at, 1), "data_freshness": exchanges,
+            "heartbeats": heartbeat_status}
+
 # ================= سرور داخلی برای زنده نگه داشتن Render =================
 class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path.split("?", 1)[0] in ("/health", "/healthz", "/status"):
-            payload = health_snapshot()
-            body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            self.send_response(200 if payload["status"] == "ok" else 503)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
+        status = get_health_status()
+        body = json.dumps(status, ensure_ascii=False).encode("utf-8")
+        self.send_response(200 if status["healthy"] else 503)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(b"Bitpin Trading Bot is Running! See /health for data freshness.")
+        self.wfile.write(body)
 
     def do_HEAD(self):
-        payload = health_snapshot()
-        self.send_response(200 if payload["status"] == "ok" else 503)
+        status = get_health_status()
+        self.send_response(200 if status["healthy"] else 503)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
         self.end_headers()
+
+    def log_message(self, fmt, *args):
+        return
 
 def run_http_server():
     port = int(os.environ.get("PORT", 10000))
@@ -264,9 +232,12 @@ def fetch_bitpin_ticker_price(market_code):
             if response.status_code == 200:
                 price = extract_price(response.json())
                 if price is not None:
+                    record_data_event("bitpin", True, f"ticker:{market_code}")
                     return price
         except Exception as e:
+            record_data_event("bitpin", False, error=e)
             print(f"[Bitpin Ticker] {market_code} fetch error: {e}")
+    record_data_event("bitpin", False, error=f"No ticker data for {market_code}")
     print(f"[Bitpin Ticker] No live price available for {market_code}; signal skipped.")
     return None
 
@@ -313,7 +284,7 @@ def fetch_bitpin_candles(market_code, resolution=TIMEFRAME, count=100):
         r = requests.get(OHLC_URL, params=params, headers=headers, timeout=15)
 
         if r.status_code != 200:
-            record_data_error("bitpin", f"HTTP {r.status_code} candles {market_code}")
+            record_data_event("bitpin", False, error=f"Candle HTTP {r.status_code}")
             return None
 
         data = r.json()
@@ -322,10 +293,10 @@ def fetch_bitpin_candles(market_code, resolution=TIMEFRAME, count=100):
             if isinstance(data, dict) and "output" in data:
                 data = data["output"]
             else:
-                record_data_error("bitpin", f"empty/invalid candle payload {market_code}")
+                record_data_event("bitpin", False, error="Invalid or empty candle response")
                 return None
         if not data:
-            record_data_error("bitpin", f"empty candle list {market_code}")
+            record_data_event("bitpin", False, error="Empty candle response")
             return None
 
         timestamps, opens, highs, lows, closes, volumes = [], [], [], [], [], []
@@ -346,14 +317,10 @@ def fetch_bitpin_candles(market_code, resolution=TIMEFRAME, count=100):
             "close": closes,
             "volume": volumes
         })
-        if df.empty or not all(math.isfinite(float(df.iloc[-1][k])) for k in ("open", "high", "low", "close", "volume")):
-            record_data_error("bitpin", f"empty/invalid candles {market_code}")
-            return None
-        latest_ts = int(df["timestamp"].max()) if len(df) else None
-        record_data("bitpin", item=market_code, candle_ts=latest_ts)
+        record_data_event("bitpin", True, f"candles:{market_code}:{resolution}")
         return df
     except Exception as e:
-        record_data_error("bitpin", f"{market_code}: {e}")
+        record_data_event("bitpin", False, error=e)
         return None
 
 # ================= محاسبه اندیکاتورها =================
@@ -963,10 +930,8 @@ def check_hit(symbol, direction, tp1, sl, candle_high, candle_low):
 
 def run_signal_tracker():
     print("Signal tracker loop started.")
-    heartbeat("signal_tracker", "started")
     while True:
         try:
-            heartbeat("signal_tracker", "polling")
             time.sleep(60)
             with tracker_lock:
                 open_signals = {k: v.copy() for k, v in signal_tracker.items() if v.get("status") == "OPEN"}
@@ -1021,11 +986,11 @@ def _binance_get(path, params=None, timeout=12):
             payload = response.json()
             if isinstance(payload, dict) and payload.get("code") not in (None, 0):
                 raise ValueError(f"Binance API error: {payload}")
-            record_data("binance", item=path)
+            record_data_event("binance", True, path)
             return payload
         except Exception as exc:
+            record_data_event("binance", False, error=exc)
             errors.append(f"{base}: {exc}")
-    record_data_error("binance", "; ".join(errors))
     raise RuntimeError("All public Binance spot endpoints failed: " + " | ".join(errors))
 
 
@@ -1109,11 +1074,10 @@ def scan_eli_whale_once(symbols=None):
 def run_eli_whale_tracker():
     """Spot-market volume polling loop, isolated from the Bitpin scanner."""
     print(f"{ELI_WHALE_NAME} Binance Spot tracker started.")
-    heartbeat("eli_whale_tracker", "started")
     cached_universe, refreshed_at = [], 0.0
     while True:
         try:
-            heartbeat("eli_whale_tracker", f"polling; universe_size={len(cached_universe)}")
+            record_heartbeat("binance_tracker")
             now = time.time()
             if not cached_universe or now - refreshed_at >= 3600:
                 cached_universe = fetch_binance_spot_universe()
@@ -1131,6 +1095,7 @@ def telegram_stats_command_handler():
     offset = 0
     while True:
         try:
+            record_heartbeat("telegram_polling")
             url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
             r = requests.get(url, params={"offset": offset, "timeout": 25}, timeout=35)
             data = r.json() if r.status_code == 200 else {}
@@ -1139,7 +1104,20 @@ def telegram_stats_command_handler():
                 msg = update.get("message") or {}
                 text = (msg.get("text") or "").strip()
                 chat_id = msg.get("chat", {}).get("id")
-                if text.startswith("/stats") and chat_id is not None:
+                command = text.split()[0].split("@", 1)[0].lower() if text else ""
+                if command == "/status" and chat_id is not None:
+                    status = get_health_status()
+                    report = ("🩺 وضعیت سلامت ربات: " + status["status"].upper() + "\n"
+                              + "تازگی داده‌ها (ثانیه):\n"
+                              + "Bitpin: " + str(status["data_freshness"]["bitpin"]["age_seconds"]) + "\n"
+                              + "Binance: " + str(status["data_freshness"]["binance"]["age_seconds"]) + "\n"
+                              + "Heartbeat: " + json.dumps(status["heartbeats"], ensure_ascii=False))
+                    try:
+                        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                                      json={"chat_id": chat_id, "text": report}, timeout=10)
+                    except Exception as e:
+                        print(f"[Status] Send error: {e}")
+                elif command == "/stats" and chat_id is not None:
                     total, wins, losses, open_signals, ambiguous = tracker_stats()
                     report = (
                         "📊 <b>گزارش سیگنال‌ها (/stats)</b>\n\n"
@@ -1223,7 +1201,6 @@ def register_and_send(strategy_name, msg, symbol, is_margin=True, long_confirmed
 
 def run_scanner():
     print("Market scanner started successfully.")
-    heartbeat("bitpin_scanner", "started")
 
     test_msg = (
         "🚀 <b>ربات اسکنر بیت‌پین (حالت دیباگ) روشن شد!</b>\n\n"
@@ -1237,7 +1214,7 @@ def run_scanner():
 
     while True:
         try:
-            heartbeat("bitpin_scanner", "loop active")
+            record_heartbeat("scanner")
             now = datetime.now(timezone.utc)
             quarter_start = now.replace(minute=(now.minute // 15) * 15, second=0, microsecond=0)
             candle_close = quarter_start + timedelta(minutes=15)
@@ -1301,31 +1278,23 @@ def run_scanner():
                     time.sleep(0.3)
 
                 last_scanned_candle_time[scan_phase] = current_candle_id
-                heartbeat("bitpin_scanner", f"{scan_phase} scan finished; symbols={len(MARGIN_SYMBOLS)}")
-                _LOG.info("Bitpin %s market scan finished for %d symbols", scan_phase, len(MARGIN_SYMBOLS))
                 print(f"[{datetime.now(timezone.utc).strftime('%H:%M:%S')}] {scan_phase.capitalize()} scan finished.")
 
             time.sleep(0.25)
 
         except Exception as e:
-            _LOG.exception("Scanner loop error")
             print(f"Loop error: {e}")
             time.sleep(10)
 
 # ================= نقطه اجرای برنامه =================
 if __name__ == "__main__":
     load_tracker()
-    _LOG.info("Bot starting; log_file=%s; freshness thresholds bitpin=%ss binance=%ss",
-              LOG_FILE, BITPIN_DATA_STALE_SECONDS, BINANCE_DATA_STALE_SECONDS)
 
     server_thread = threading.Thread(target=run_http_server, daemon=True)
     server_thread.start()
 
     ping_thread = threading.Thread(target=self_ping, daemon=True)
     ping_thread.start()
-
-    heartbeat_thread = threading.Thread(target=monitor_heartbeats, daemon=True)
-    heartbeat_thread.start()
 
     tracker_thread = threading.Thread(target=run_signal_tracker, daemon=True)
     tracker_thread.start()
