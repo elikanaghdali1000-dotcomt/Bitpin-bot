@@ -30,7 +30,10 @@ BITPIN_HEADERS = {
 BASE_API_BITPIN = "https://api.bitpin.org/api"
 OHLC_URL_BITPIN = f"{BASE_API_BITPIN}/v1/mkt/candles/"
 MARKETS_URL_BITPIN = f"{BASE_API_BITPIN}/v1/mkt/markets/"
-BINANCE_FAPI_URL = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+
+# آدرس‌های بایننس فیوچرز
+BINANCE_FAPI_EXCHANGE_INFO = "https://fapi.binance.com/fapi/v1/exchangeInfo"
+BINANCE_FAPI_KLINES = "https://fapi.binance.com/fapi/v1/klines"
 
 # ================= ارسال پیام به تلگرام =================
 def send_telegram_message(text):
@@ -61,16 +64,13 @@ def fetch_bitpin_markets():
 
 def fetch_bitpin_candles(symbol, resolution="60", count=100):
     try:
-        # تبدیل بازه زمانی به پارامترهای بیت‌پین
         params = {"symbol": symbol, "resolution": resolution, "count": count}
         res = requests.get(OHLC_URL_BITPIN, headers=BITPIN_HEADERS, params=params, timeout=15)
         if res.status_code == 200:
             data = res.json()
-            # استخراج کندل‌ها بر اساس ساختار پاسخ بیت‌پین
             candles = data.get("candles", data) if isinstance(data, dict) else data
             if isinstance(candles, list) and len(candles) > 0:
                 df = pd.DataFrame(candles)
-                # استانداردسازی نام ستون‌ها
                 if "time" in df.columns:
                     df.rename(columns={"time": "Timestamp", "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume"}, inplace=True)
                 for col in ["Open", "High", "Low", "Close", "Volume"]:
@@ -81,8 +81,39 @@ def fetch_bitpin_candles(symbol, resolution="60", count=100):
         print(f"Bitpin Candles Error for {symbol}: {e}")
     return None
 
-# ================= ۴ استراتژی معاملاتی =================
-def evaluate_strategies(symbol, df):
+# ================= توابع دریافت داده بایننس فیوچرز =================
+def fetch_binance_symbols():
+    try:
+        res = requests.get(BINANCE_FAPI_EXCHANGE_INFO, proxies=PROXIES, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            symbols = [s["symbol"] for s in data.get("symbols", []) if s.get("contractType") == "PERPETUAL" and s.get("quoteAsset") == "USDT"]
+            return symbols
+    except Exception as e:
+        print(f"Binance Symbols Error: {e}")
+    return []
+
+def fetch_binance_candles(symbol, interval="1h", limit=100):
+    try:
+        params = {"symbol": symbol, "interval": interval, "limit": limit}
+        res = requests.get(BINANCE_FAPI_KLINES, params=params, proxies=PROXIES, timeout=15)
+        if res.status_code == 200:
+            data = res.json()
+            if isinstance(data, list) and len(data) > 0:
+                df = pd.DataFrame(data, columns=[
+                    'Open_time', 'Open', 'High', 'Low', 'Close', 'Volume',
+                    'Close_time', 'Quote_asset_volume', 'Number_of_trades',
+                    'Taker_buy_base_asset_volume', 'Taker_buy_quote_asset_volume', 'Ignore'
+                ])
+                for col in ["Open", "High", "Low", "Close", "Volume"]:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+                return df
+    except Exception as e:
+        print(f"Binance Candles Error for {symbol}: {e}")
+    return None
+
+# ================= ۴ استراتژی معاملاتی مشترک =================
+def evaluate_strategies(exchange_name, symbol, df):
     if df is None or len(df) < 30:
         return
 
@@ -90,7 +121,6 @@ def evaluate_strategies(symbol, df):
     prev = df.iloc[-2]
     close_price = last['Close']
     
-    # محاسبه اندیکاتورهای ساده مورد نیاز
     df['SMA20'] = df['Close'].rolling(window=20).mean()
     df['STD20'] = df['Close'].rolling(window=20).std()
     df['UpperBB'] = df['SMA20'] + (df['STD20'] * 2)
@@ -102,49 +132,31 @@ def evaluate_strategies(symbol, df):
 
     signals = []
 
-    # 1. استراتژی Sensi (بر اساس عبور از میانگین متحرک)
+    # 1. Sensi Strategy
     if prev['Close'] < df['SMA20'].iloc[-2] and last['Close'] > sma20:
         signals.append("🟢 استراتژی Sensi: تقاطع صعودی SMA20")
 
-    # 2. استراتژی Bollinger Trend (خروج از باندهای بولینگر)
+    # 2. Bollinger Trend
     if last['Close'] > upper_bb:
         signals.append("🚀 استراتژی Bollinger: شکست باند بالایی به سمت بالا")
     elif last['Close'] < lower_bb:
         signals.append("⚠️ استراتژی Bollinger: نفوذ به زیر باند پایینی")
 
-    # 3. استراتژی Pullback (پولبک به سطح حمایت/میانگین)
+    # 3. Pullback
     if last['Low'] <= sma20 and close_price > sma20:
         signals.append("🔄 استراتژی Pullback: پولبک موفق به SMA20")
 
-    # 4. استراتژی Break & Retest (شکست و تست مجدد مقاومت قبلی)
+    # 4. Break & Retest
     recent_high = df['High'].iloc[-20:-2].max()
     if prev['Close'] > recent_high and last['Close'] >= recent_high:
         signals.append("⭐ استراتژی Break & Retest: شکست مقاومت کلیدی")
 
-    # اگر سیگنالی صادر شد، به تلگرام بفرست
     if signals:
-        msg = f"🔔 *سیگنال جدید*\nارز: `{symbol}`\nقیمت: `{close_price}` IRT\n\n" + "\n".join(signals)
+        msg = f"🔔 *سیگنال جدید ({exchange_name})*\nارز: `{symbol}`\nقیمت: `{close_price}`\n\n" + "\n".join(signals)
         send_telegram_message(msg)
 
-# ================= وب‌سرور مانیتورینگ برای Render =================
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain; charset=utf-8")
-        self.end_headers()
-        self.wfile.write(b"Bot is running successfully and alive! /ok")
-    def log_message(self, format, *args):
-        return
-
-def run_http_server():
-    port = int(os.environ.get("PORT", 10000))
-    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
-    server.serve_forever()
-
-# ================= حلقه اصلی ربات =================
-def main():
-    send_telegram_message("🤖 ربات تحلیل و شکار نهنگ راه‌اندازی شد\n\n📊 وضعیت: اسکن تمام بازارهای تومانی بیت‌پین با ۴ استراتژی آغاز شد. /ok")
-    
+# ================= ترد اسکن بیت‌پین =================
+def bitpin_worker():
     while True:
         try:
             markets = fetch_bitpin_markets()
@@ -153,17 +165,56 @@ def main():
                 if symbol and symbol.endswith("_IRT"):
                     df = fetch_bitpin_candles(symbol, "60", 100)
                     if df is not None and not df.empty:
-                        evaluate_strategies(symbol, df)
-                    time.sleep(1) # وقفه کوتاه بین درخواست‌ها
-            
-            # استراحت بین هر دور اسکن کامل بازارها (مثلاً ۵ دقیقه)
+                        evaluate_strategies("Bitpin", symbol, df)
+                    time.sleep(0.5)
             time.sleep(300)
         except Exception as e:
-            print(f"Main Loop Error: {e}")
+            print(f"Bitpin Worker Error: {e}")
             time.sleep(60)
 
+# ================= ترد اسکن بایننس فیوچرز =================
+def binance_worker():
+    while True:
+        try:
+            symbols = fetch_binance_symbols()
+            for symbol in symbols:
+                df = fetch_binance_candles(symbol, "1h", 100)
+                if df is not None and not df.empty:
+                    evaluate_strategies("Binance Futures", symbol, df)
+                time.sleep(0.3)
+            time.sleep(300)
+        except Exception as e:
+            print(f"Binance Worker Error: {e}")
+            time.sleep(60)
+
+# ================= وب‌سرور مانیتورینگ برای Render =================
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Both Bitpin and Binance Bots are running successfully! /ok")
+    def log_message(self, format, *args):
+        return
+
+def run_http_server():
+    port = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", port), SimpleHandler)
+    server.serve_forever()
+
+# ================= اجرای اصلی =================
 if __name__ == "__main__":
-    # استارت سرور وب در ترد جداگانه برای رندر
+    send_telegram_message("🤖 ربات ترکیبی تحلیل بازار راه‌اندازی شد\n\n📊 وضعیت: اسکن همزمان بازارهای بیت‌پین و بایننس فیوچرز با ۴ استراتژی آغاز شد. /ok")
+    
+    # راه‌اندازی وب‌سرور رندر
     threading.Thread(target=run_http_server, daemon=True).start()
-    # شروع حلقه اصلی ربات
-    main()
+    
+    # راه‌اندازی ترد بیت‌پین
+    threading.Thread(target=bitpin_worker, daemon=True).start()
+    
+    # راه‌اندازی ترد بایننس فیوچرز
+    threading.Thread(target=binance_worker, daemon=True).start()
+    
+    # نگه داشتن ترد اصلی برنامه
+    while True:
+        time.sleep(1)
