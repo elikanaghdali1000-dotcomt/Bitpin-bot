@@ -1,50 +1,45 @@
 # -*- coding: utf-8 -*-
 import os
 import time
+import json
 import requests
 import pandas as pd
 import threading
+from datetime import datetime, timezone
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ================= تنظیمات اصلی و متغیرها =================
+# ================= تنظیمات اصلی و اطلاعات اختصاصی =================
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8947033412:AAEPvb8CEn5I_9Bxe8oqPuGD1gNjfY5TrUA")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "6643451227")
 
-# دامنه‌های رسمی بیت‌پین
-BITPIN_HOSTS = [
-    "https://api.bitpin.ir",
-    "https://api.bitpin.org"
-]
+BASE_API = "https://api.bitpin.org/api"
+OHLC_URL = f"{BASE_API}/v1/mkt/candles/"
+MARKETS_URL = f"{BASE_API}/v1/mkt/markets/"
 
-# میرورهای متنوع بایننس (اسپات و فیوچرز برای عبور از تحریم سرور اروپا)
-BINANCE_ENDPOINTS = [
-    ("https://data-api.binance.vision/api/v3/ticker/24hr", "spot"),
-    ("https://api.binance.com/api/v3/ticker/24hr", "spot"),
-    ("https://fapi.binance.com/fapi/v1/ticker/24hr", "futures")
-]
-
-WHALE_VOLUME_THRESHOLD = 500000.0
-
-# سشن پایدار با تنظیمات کامل مرورگر
-SESSION = requests.Session()
-SESSION.headers.update({
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+# هدرهای شبیه‌ساز مرورگر برای جلوگیری از خطاهای 403 / 418 / 451
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache"
-})
+    "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
+    "Referer": "https://bitpin.ir/"
+}
 
-# ================= سرور سلامت رندر =================
+# تنظیمات معاملاتی و فیلترها
+BOLLINGER_SQUEEZE_THRESHOLD = 2.0
+WHALE_VOLUME_THRESHOLD = 500000.0  # ۵۰۰ هزار تتر حجم تجمیعی بایننس فیوچرز
+SIGNAL_TRACKER_FILE = "signal_tracker.json"
+
+# ================= سرور سلامت رندر (پشتیبانی از متد HEAD و GET) =================
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Bot is Running!")
+        self.wfile.write(b"Bitpin Multi-Strategy & Binance Whale Bot is Running Successfully!")
 
     def do_HEAD(self):
         self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
 
 def run_server():
@@ -52,40 +47,44 @@ def run_server():
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     server.serve_forever()
 
-# ================= پیام‌رسان تلگرام =================
+# ================= توابع ارسال تلگرام =================
 def send_telegram_message(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": text,
+        "parse_mode": "HTML"
+    }
     try:
-        SESSION.post(url, json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"}, timeout=12)
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"[Telegram Err] {e}")
+        print(f"Telegram send error: {e}")
 
 # ================= دریافت داده از بیت‌پین =================
-ACTIVE_BITPIN_HOST = BITPIN_HOSTS[0]
-
 def fetch_bitpin_markets():
-    global ACTIVE_BITPIN_HOST
-    for host in BITPIN_HOSTS:
-        url = f"{host}/v1/mkt/markets/"
-        try:
-            res = SESSION.get(url, timeout=12)
-            if res.status_code == 200:
-                ACTIVE_BITPIN_HOST = host
-                data = res.json()
-                return data.get("results", data) if isinstance(data, dict) else data
-            else:
-                print(f"[Bitpin HTTP Error] {host} returned {res.status_code}")
-        except Exception as e:
-            print(f"[Bitpin Conn Error] {host} -> {e}")
+    try:
+        res = requests.get(MARKETS_URL, headers=BROWSER_HEADERS, timeout=10)
+        print(f"[Bitpin Markets Test] Status Code: {res.status_code}")
+        if res.status_code == 200:
+            data = res.json()
+            markets = data.get("results", data) if isinstance(data, dict) else data
+            print(f"[Bitpin Markets Test] Successfully loaded {len(markets)} markets.")
+            return markets
+    except Exception as e:
+        print(f"Error fetching Bitpin markets: {e}")
     return []
 
 def fetch_bitpin_candles(symbol, resolution="1h", limit=100):
-    url = f"{ACTIVE_BITPIN_HOST}/v1/mkt/candles/"
     try:
-        params = {"symbol": symbol, "res": resolution, "limit": limit}
-        res = SESSION.get(url, params=params, timeout=12)
+        params = {
+            "symbol": symbol,
+            "res": resolution,
+            "limit": limit
+        }
+        res = requests.get(OHLC_URL, params=params, headers=BROWSER_HEADERS, timeout=10)
+        print(f"[Candle Test] Symbol: {symbol} | Status: {res.status_code}")
         if res.status_code == 200:
             data = res.json()
             candles = data if isinstance(data, list) else data.get("results", [])
@@ -96,134 +95,148 @@ def fetch_bitpin_candles(symbol, resolution="1h", limit=100):
                 for col in ["Open", "High", "Low", "Close", "Volume"]:
                     if col in df.columns:
                         df[col] = pd.to_numeric(df[col], errors="coerce")
-                return df.dropna()
+                df.dropna(inplace=True)
+                print(f"[Candle Test] Successfully parsed {len(df)} candles for {symbol}. Last Close: {df.iloc[-1]['Close']}")
+                return df
     except Exception as e:
-        print(f"[Bitpin Candle Err] {symbol} -> {e}")
+        print(f"Error fetching candles for {symbol}: {e}")
     return None
 
-# ================= پایش نهنگ‌های بایننس =================
+# ================= موتور رصد نهنگ‌های بایننس فیوچرز =================
 def check_binance_whales():
-    for url, market_type in BINANCE_ENDPOINTS:
-        try:
-            res = SESSION.get(url, timeout=10)
-            if res.status_code == 200:
-                tickers = res.json()
-                whales = []
-                for t in tickers:
-                    symbol = t.get("symbol", "")
-                    if symbol.endswith("USDT"):
-                        vol_key = "quoteVolume" if "quoteVolume" in t else "volume"
-                        quote_vol = float(t.get(vol_key, 0.0))
-                        if quote_vol >= WHALE_VOLUME_THRESHOLD:
-                            whales.append((symbol, quote_vol))
-                if whales:
-                    return whales
-            else:
-                print(f"[Binance HTTP Error] {url} returned {res.status_code}")
-        except Exception as e:
-            print(f"[Binance Conn Error] {url} -> {e}")
+    url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+    try:
+        res = requests.get(url, timeout=10)
+        print(f"[Binance Whale Test] Status Code: {res.status_code}")
+        if res.status_code == 200:
+            tickers = res.json()
+            whales = []
+            for t in tickers:
+                symbol = t.get("symbol", "")
+                if symbol.endswith("USDT"):
+                    quote_volume = float(t.get("quoteVolume", 0.0))
+                    if quote_volume >= WHALE_VOLUME_THRESHOLD:
+                        whales.append((symbol, quote_volume))
+            print(f"[Binance Whale Test] Found {len(whales)} symbols above {WHALE_VOLUME_THRESHOLD:,.0f} USDT volume.")
+            return whales
+    except Exception as e:
+        print(f"Binance whale tracker error: {e}")
     return []
 
-# ================= اندیکاتورها و فیلترها =================
+# ================= توابع محاسباتی تکنیکال =================
 def calculate_indicators(df):
     if df is None or len(df) < 30:
         return None
+    
     close = df["Close"]
     df["EMA200"] = close.ewm(span=200, adjust=False).mean() if len(df) >= 200 else close.ewm(span=len(df), adjust=False).mean()
     df["SMA20"] = close.rolling(window=20).mean()
     std20 = close.rolling(window=20).std()
+    
     df["BB_Upper"] = df["SMA20"] + (std20 * 2)
     df["BB_Lower"] = df["SMA20"] - (std20 * 2)
+    df["BB_Width"] = (df["BB_Upper"] - df["BB_Lower"]) / df["SMA20"] * 100
     
     delta = close.diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-    rs = gain / (loss + 1e-9)
+    rs = gain / loss
     df["RSI"] = 100 - (100 / (1 + rs))
+    
     return df
 
 def check_btc_filter():
     df_btc = fetch_bitpin_candles("BTC_IRT", "1h", 50)
     if df_btc is not None and len(df_btc) > 20:
         df_btc = calculate_indicators(df_btc)
-        if df_btc is not None:
-            last = df_btc.iloc[-1]
-            return last["Close"] >= last["SMA20"]
-    return True  # در صورت در دسترس نبودن موقت بیت‌کوین مانع سایر سیگنال‌ها نشود
+        last = df_btc.iloc[-1]
+        if last["Close"] >= last["SMA20"]:
+            return True
+    return False
 
-# ================= استراتژی‌های معاملاتی ۴ گانه =================
+# ================= استراتژی‌های معاملاتی (۴ گانه) =================
 def evaluate_strategies(symbol, df):
     df = calculate_indicators(df)
     if df is None or len(df) < 2:
         return
+    
     last = df.iloc[-1]
     prev = df.iloc[-2]
     
-    # ۱. سنسی
+    # ۱. استراتژی سنسی (Sensi)
     vol_mean = df["Volume"].rolling(20).mean().iloc[-1]
     if last["Volume"] < (vol_mean * 0.6) and last["Low"] <= last["BB_Lower"] and last["Close"] > prev["Close"]:
         if check_btc_filter():
-            send_telegram_message(f"🟢 <b>سیگنال LONG (سنسی)</b>\nارز: {symbol}\nقیمت: {last['Close']}\nخشکی حجم در کف بولینگر")
+            send_telegram_message(f"🟢 <b>سیگنال LONG (سنسی)</b>\nارز: {symbol}\nقیمت: {last['Close']}\nخشکی حجم در کف و حمایت بولینگر")
 
-    # ۲. روند بولینگر
+    # ۲. استراتژی روند بولینگر (Trend Strategy)
     if last["Close"] <= last["BB_Lower"] and last["Close"] > last["EMA200"] and last["RSI"] < 35:
         if check_btc_filter():
             send_telegram_message(f"🟢 <b>سیگنال LONG (روند بولینگر)</b>\nارز: {symbol}\nقیمت: {last['Close']}\nRSI: {last['RSI']:.1f}")
 
-    # ۳. پولبک صعودی
+    # ۳. استراتژی پولبک (Pullback Strategy)
     if last["Close"] > last["EMA200"] and prev["Low"] <= last["SMA20"] and last["Close"] > last["SMA20"] and 35 <= last["RSI"] <= 60:
         if check_btc_filter():
-            send_telegram_message(f"🟢 <b>سیگنال LONG (پولبک صعودی)</b>\nارز: {symbol}\nقیمت: {last['Close']}\nبرخورد به میانگین متحرک")
+            send_telegram_message(f"🟢 <b>سیگنال LONG (پولبک صعودی)</b>\nارز: {symbol}\nقیمت: {last['Close']}\nبرخورد به میانگین متحرک و تایید صعود")
 
-    # ۴. شکست و پولبک نزولی
+    # ۴. استراتژی شکست و پولبک (Break & Retest - مخصوص SHORT)
     if prev["Close"] < prev["BB_Lower"] and last["Close"] > prev["Close"] and last["Close"] < last["SMA20"] and last["RSI"] > 60:
-        send_telegram_message(f"🔴 <b>سیگنال SHORT (شکست و پولبک ناموفق)</b>\nارز: {symbol}\nقیمت: {last['Close']}\nری‌تست ناموفق به سطح شکسته")
+        send_telegram_message(f"🔴 <b>سیگنال SHORT (شکست و پولبک ناموفق)</b>\nارز: {symbol}\nقیمت: {last['Close']}\nپولبک ناموفق به سطح شکسته شده")
 
-# ================= حلقه اصلی =================
+# ================= حلقه اصلی ربات و تست استارت =================
 def main_loop():
-    print("🚀 Bot starting on Render...")
+    print("==================================================")
+    print("🚀 Bitpin & Binance Whale Bot Starting Up...")
+    print("==================================================")
+    
+    # راه‌اندازی سرور وب در ترد جداگانه
     threading.Thread(target=run_server, daemon=True).start()
     
-    time.sleep(2)
+    # --- تست سلامت اولیه و ارسال گزارش به تلگرام همراه با /ok ---
+    print("\n[Startup Test] Running initial connection test...")
+    
     test_markets = fetch_bitpin_markets()
+    bitpin_ok = len(test_markets) > 0 if test_markets else False
+    
     test_whales = check_binance_whales()
+    binance_ok = len(test_whales) > 0 if test_whales else False
     
-    bitpin_ok = bool(test_markets)
-    binance_ok = bool(test_whales)
+    bp_status_text = f"متصل ✅ ({len(test_markets)} بازار)" if bitpin_ok else "خطا در ارتباط ❌"
+    bn_status_text = f"متصل ✅ ({len(test_whales)} نماد نهنگ)" if binance_ok else "خطا در ارتباط ❌"
     
-    msg = "🤖 <b>ربات تحلیل و شکار نهنگ راه‌اندازی شد</b>\n\n"
-    if bitpin_ok and binance_ok:
-        msg += "✅ <b>وضعیت کلی: کاملاً سالم و آنلاین</b> (/ok)\n\n"
-    else:
-        msg += "⚠️ <b>وضعیت کلی: بررسی خطا</b>\n\n"
-        
-    msg += f"📊 <b>بیت‌پین:</b> {'متصل ✅ (' + str(len(test_markets)) + ' بازار)' if bitpin_ok else 'خطا در ارتباط ❌'}\n"
-    msg += f"🐋 <b>بایننس:</b> {'متصل ✅ (' + str(len(test_whales)) + ' نماد)' if binance_ok else 'خطا در ارتباط ❌'}\n\n"
-    msg += "عملیات جمع‌آوری داده‌ها آغاز شد."
-    send_telegram_message(msg)
+    startup_msg = (
+        "🤖 <b>ربات تحلیل و شکار نهنگ راه‌اندازی شد</b>\n\n"
+        f"📊 <b>بیت‌پین:</b> {bp_status_text}\n"
+        f"🐋 <b>بایننس:</b> {bn_status_text}\n\n"
+        "عملیات جمع‌آوری داده‌ها و اسکن بازارها با موفقیت آغاز شد.\n"
+        "/ok"
+    )
+    send_telegram_message(startup_msg)
+    print("[Startup Test] Telegram startup alert sent.")
+    print("==================================================\n")
     
+    # شروع حلقه اصلی پایش بازار
     while True:
         try:
             whales = check_binance_whales()
             if whales:
-                whales.sort(key=lambda x: x[1], reverse=True)
-                w_msg = "🐋 <b>۵ نماد برتر با حجم سنگین بایننس:</b>\n"
-                for s, v in whales[:5]:
-                    w_msg += f"• {s}: {v:,.0f} USDT\n"
-                send_telegram_message(w_msg)
-                
+                msg = "🐋 <b>گزارش حجم نهنگ‌های بایننس فیوچرز (>500k USDT):</b>\n"
+                for sym, vol in whales[:5]:
+                    msg += f"- {sym}: {vol:,.0f} USDT\n"
+                send_telegram_message(msg)
+
             markets = fetch_bitpin_markets()
-            if markets:
-                irt_markets = [m for m in markets if (m.get("code") or m.get("symbol") or "").endswith("_IRT")]
-                for m in irt_markets[:20]:
-                    sym = m.get("code") or m.get("symbol")
-                    if sym:
-                        df = fetch_bitpin_candles(sym, "1h", 100)
-                        if df is not None and not df.empty:
-                            evaluate_strategies(sym, df)
-                        time.sleep(1)
+            for m in markets[:15]:
+                symbol = m.get("code") or m.get("symbol")
+                if symbol and symbol.endswith("_IRT"):
+                    df = fetch_bitpin_candles(symbol, "1h", 100)
+                    if df is not None and not df.empty:
+                        evaluate_strategies(symbol, df)
+                    time.sleep(1)
+
         except Exception as e:
-            print(f"[Loop Exception] {e}")
+            print(f"Main loop error: {e}")
+        
         time.sleep(300)
 
 if __name__ == "__main__":
