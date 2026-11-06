@@ -4,51 +4,6 @@
 =======================================================================
  ربات سیگنال بیت‌پین — استراتژی «شکست کانال دانچیان ۵۵» روی تایم‌فریم ۴ ساعته
 =======================================================================
-این ربات همان استراتژی‌ای است که در بک‌تست (۲۰۲۳-۰۴ تا ۲۰۲۶-۱۱، ۳۵ نماد)
-اعتبارسنجی شد و نتیجه داد:
-
-    • ورود (LONG فقط):  close > بالاترین سقف ۵۵ کندل اخیر (shift شده)
-    • فیلترها:          حجم ≥ 1.2 برابر میانگین ۲۰ کندل
-                        ADX ≥ 18  (بازار رِنج نباشد)
-                        EMA50 > EMA200  (روند بزرگ صعودی)
-    • حد ضرر:           2.5 × ATR(14) زیر ورود
-    • حد سود:           8.0 × ATR(14) بالای ورود   (R:R ≈ 3.2)
-    • تریلینگ:          ندارد (تریلینگ در تست نتیجه را خراب کرد)
-    • خروج زمانی:       ۴۸ کندل ۴ساعته ≈ ۸ روز
-    • شورت:             ندارد (شورت در تست ضررده بود)
-    • سیگنال فقط روی کندلِ بسته‌شده؛ ورود «مارکت» در بازشدن کندل بعد
-    • فیلتر «تازگی شکست» ندارد: بک‌تست نشان داد حذف ورودهای مجدد در یک روند،
-      سود را از ۵۴۸٪ به ۱۵۷٪ کاهش می‌دهد. برگشت به روند بعد از استاپ، خودش سیگنال است.
-
-نتیجه بک‌تست روی «لیست سفید ۱۵ نمادی» (داده بومی ۴ساعته بیت‌پین،
-۲۰۲۳-۰۴-۱۵ تا ۲۰۲۶-۱۱، با کارمزد ۰.۲٪ و اسلیپیج ۰.۱۵٪):
-    ۳۳۱ معامله | وین‌ریت ۴۲.۰٪ | PF 1.63 | میانگین +0.31R | مجموع +101.9R
-    پورتفوی با ریسک ۱٪ در هر معامله: ۲.۶۴ برابر در ۳.۵ سال، حداکثر افت ۲۹٪
-    پورتفوی با ریسک ۰.۵٪:           ۱.۶۴ برابر، حداکثر افت ۱۶٪
-
-    تقسیم سالانه (ریسک ۱٪):  ۲۰۲۳ +۱۲٪ | ۲۰۲۴ +۱۰۶٪ | ۲۰۲۵ −۵٪ | ۲۰۲۶ +۲۱٪
-    ⚠️ سال ۲۰۲۵ منفی بود؛ این استراتژی سالِ بد هم دارد.
-
-    برای مقایسه: اگر هر ۳۶ نماد را معامله کنید PF به 1.16 سقوط می‌کند.
-    سود از «چند ترید بزرگ» می‌آید نه از دقت بالا (۵٪ برتر معاملات ≈ ۱۸٪ سود).
-    پس: بدون مدیریت سرمایه و بدون پایبندی به حد ضرر، این استراتژی ضررده می‌شود.
-
-⚠️ این ربات «سیگنال‌ده» است، نه معامله‌گر خودکار. هیچ سفارشی روی صرافی نمی‌گذارد.
-⚠️ خروجی این برنامه توصیه سرمایه‌گذاری نیست. مسئولیت هر معامله با خود شماست.
-
-اجرا:
-    export TELEGRAM_BOT_TOKEN="8947033412:AAEPvb8CEn5I_9Bxe8oqPuGD1gNjfY5TrUA"
-    export TELEGRAM_CHAT_ID="6643451227"
-    python3 bitpin_donchian_bot.py
-
-متغیرهای محیطی مهم:
-    DRY_RUN=1               حالت آزمایشی (پیش‌فرض ۱): سیگنال‌ها فقط لاگ می‌شوند
-    TIMEFRAME=4h            تایم‌فریم (۴h پیشنهادی؛ 1h هم پشتیبانی می‌شود)
-    SYMBOLS="SOL_USDT,..."  لیست سفارشی نمادها
-    EQUITY_USDT=1000        سرمایه فرضی برای محاسبه حجم
-    RISK_PCT=1.0            درصد ریسک هر معامله
-    PORT=10000              پورت health-check (برای Render/Railway)
-=======================================================================
 """
 
 import os
@@ -89,31 +44,34 @@ def _env_int(name, default):
     except (TypeError, ValueError):
         return default
 
+# حالت واقعی (غیر آزمایشی)
 DRY_RUN          = _env_bool("DRY_RUN", False)
 
 TIMEFRAME        = os.getenv("TIMEFRAME", "4h").strip().lower()
 PERIOD           = 14400 if TIMEFRAME == "4h" else 3600
+
+# اطلاعات تلگرام (ثابت‌شده و قابل خواندن از محیط)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-TG_IN_DRY_RUN    = _env_bool("TG_IN_DRY_RUN", True)   # در حالت تست هم پیام بفرست؟
+TG_IN_DRY_RUN    = _env_bool("TG_IN_DRY_RUN", True)
 
 EQUITY_USDT      = _env_float("EQUITY_USDT", 1000.0)
 RISK_PCT         = _env_float("RISK_PCT", 1.0)
-MAX_NOTIONAL_MULT = _env_float("MAX_NOTIONAL_MULT", 5.0)  # سقف حجم = ۵ برابر سرمایه
+MAX_NOTIONAL_MULT = _env_float("MAX_NOTIONAL_MULT", 5.0)
 
-# --- پارامترهای استراتژی (دست نزنید مگر با بک‌تست مجدد) ---
-DC_LEN       = 55      # طول کانال دانچیان
-VOL_MULT     = 1.2     # حداقل نسبت حجم
-ADX_MIN      = 18.0    # حداقل ADX
+# --- پارامترهای استراتژی ---
+DC_LEN       = 55
+VOL_MULT     = 1.2
+ADX_MIN      = 18.0
 ATR_LEN      = 14
-SL_ATR       = 2.5     # حد ضرر = ۲.۵ ATR
-TP_ATR       = 8.0     # حد سود  = ۸ ATR
-MAX_HOLD     = 48      # حداکثر نگهداری (کندل)
-WARMUP       = 260     # کندل لازم برای گرم شدن اندیکاتورها (EMA200 + حاشیه)
-MIN_RISK_PCT = 0.25    # اگر فاصله SL کمتر از این درصد باشد، سیگنال رد می‌شود
-MAX_RISK_PCT = 15.0    # اگر فاصله SL بیشتر از این درصد باشد (ATR غیرعادی)، سیگنال رد می‌شود
+SL_ATR       = 2.5
+TP_ATR       = 8.0
+MAX_HOLD     = 48
+WARMUP       = 260
+MIN_RISK_PCT = 0.25
+MAX_RISK_PCT = 15.0
 
-# --- لیست سفید نمادها: فقط نمادهایی که در بک‌تست سود مثبت داشتند ---
+# --- لیست سفید نمادها ---
 DEFAULT_SYMBOLS = [
     "SOL_USDT", "ADA_USDT", "XRP_USDT", "ALGO_USDT", "GALA_USDT", "AAVE_USDT",
     "CRV_USDT", "NEAR_USDT", "ARB_USDT", "UNI_USDT", "SUI_USDT", "VET_USDT",
@@ -151,10 +109,10 @@ def log(msg, level="info"):
             pass
 
 # =====================================================================
-# ۳) لایه HTTP
+# ۳) لایه HTTP (بدون دامنه .com اشتباه)
 # =====================================================================
 BITPIN_HOSTS = [h.strip().rstrip("/") for h in os.getenv(
-    "BITPIN_HOSTS", "https://api.bitpin.org,https://api.bitpin.ir,https://api.bitpin.com"
+    "BITPIN_HOSTS", "https://api.bitpin.ir,https://api.bitpin.org"
 ).split(",") if h.strip()]
 CANDLES_PATH = "/api/v1/mkt/candles/"
 TICKERS_PATH = "/api/v1/mkt/tickers/"
@@ -170,12 +128,6 @@ SESSION.headers.update({
     "Accept-Encoding": "gzip, deflate, br",
     "Origin": "https://bitpin.ir",
     "Referer": "https://bitpin.ir/",
-    "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-site",
     "Connection": "keep-alive",
 })
 
@@ -365,7 +317,6 @@ def evaluate(df):
         "vol_ratio": float(row["vol_ratio"]),
         "ema50": float(row["ema50"]),
         "ema200": float(row["ema200"]),
-        "bars_above_ema200": int((d["Close"] > d["ema200"]).tail(20).sum()),
         "reason": "شکست سقف ۵۵ کندل با تأیید حجم/ADX/روند" if triggered else "شرط ورود کامل نیست",
     }
 
@@ -382,8 +333,7 @@ def build_levels(sig, price):
 
     risk_pct = (entry - sl) / entry * 100
     if not (MIN_RISK_PCT <= risk_pct <= MAX_RISK_PCT):
-        return {"rejected": True, "risk_pct": risk_pct,
-                "why": f"فاصله حد ضرر {risk_pct:.1f}% خارج از بازه مجاز"}
+        return {"rejected": True, "risk_pct": risk_pct}
 
     risk_usdt = EQUITY_USDT * RISK_PCT / 100.0
     qty = risk_usdt / (entry - sl)
@@ -415,9 +365,6 @@ _TG = {"lock": threading.Lock(), "ts": 0.0}
 TG_MIN_GAP = 1.2
 
 def send_telegram(text):
-    if DRY_RUN and not TG_IN_DRY_RUN:
-        print(text)
-        return False
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("\n" + text + "\n")
         return False
@@ -475,7 +422,7 @@ def format_signal(symbol, sig, lv):
     return "\n".join(lines)
 
 def format_exit(pos, result, price, bars_held):
-    icon = {"tp": "✅", "sl": "🛑", "time": "⏳", "manual": "⚪"}.get(result, "⚪")
+    icon = {"tp": "✅", "sl": "🛑", "time": "⏳"}.get(result, "⚪")
     title = {"tp": "حد سود خورد", "sl": "حد ضرر خورد", "time": "خروج زمانی"}.get(result, result)
     pnl_pct = (price / pos["entry"] - 1) * 100
     r_mult = (price - pos["entry"]) / (pos["entry"] - pos["sl"]) if pos["entry"] != pos["sl"] else 0
@@ -636,9 +583,6 @@ def run_cycle():
             save_state()
         except Exception:
             STATS["errors"] += 1
-
-        if HTTP_STATE["ok_streak"] == 0 and idx >= 3 and not candles_cache:
-            return {"ok": False, "data_symbols": 0, "signals": found}
 
     try:
         track_open_positions(candles_cache, prices)
