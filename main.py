@@ -47,8 +47,8 @@ TIMEFRAME        = os.getenv("TIMEFRAME", "4h").strip().lower()
 PERIOD           = 14400 if TIMEFRAME == "4h" else 3600
 
 # اطلاعات تلگرام (ثابت‌شده و قابل خواندن از محیط)
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8947033412:AAEPvb8CEn5I_9Bxe8oqPuGD1gNjfY5TrUA").strip()
+TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "6643451227").strip()
 TG_IN_DRY_RUN    = _env_bool("TG_IN_DRY_RUN", True)
 
 EQUITY_USDT      = _env_float("EQUITY_USDT", 1000.0)
