@@ -148,7 +148,12 @@ def log(msg, level="info"):
 # =====================================================================
 # ۳) لایه HTTP (با چرخش میزبان)
 # =====================================================================
-BITPIN_HOSTS = ["https://api.bitpin.ir", "https://api.bitpin.org", "https://api.bitpin.com"]
+BITPIN_HOSTS = [
+    "https://api.bitpin.ir",
+    "https://api.bitpin.org",
+    "https://api.bitpin.com",
+]
+
 CANDLES_PATH = "/api/v1/mkt/candles/"
 TICKERS_PATH = "/api/v1/mkt/tickers/"
 
