@@ -1,7 +1,3 @@
-
-
-
-
 import os
 import sys
 import json
@@ -20,7 +16,7 @@ import requests
 # =====================================================================
 # ۱) تنظیمات
 # =====================================================================
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 def _env_bool(name, default=False):
     v = os.getenv(name)
@@ -46,7 +42,7 @@ DRY_RUN          = _env_bool("DRY_RUN", False)
 TIMEFRAME        = os.getenv("TIMEFRAME", "4h").strip().lower()
 PERIOD           = 14400 if TIMEFRAME == "4h" else 3600
 
-# اطلاعات تلگرام (ثابت‌شده و قابل خواندن از محیط)
+# اطلاعات تلگرام (ثابت‌شده و دست‌نخورده)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8947033412:AAEPvb8CEn5I_9Bxe8oqPuGD1gNjfY5TrUA").strip()
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "6643451227").strip()
 TG_IN_DRY_RUN    = _env_bool("TG_IN_DRY_RUN", True)
@@ -105,11 +101,16 @@ def log(msg, level="info"):
             pass
 
 # =====================================================================
-# ۳) لایه HTTP (بدون دامنه .com اشتباه)
+# ۳) لایه HTTP (اتصال قطعی از ورکر کلودفلر)
 # =====================================================================
-BITPIN_HOSTS = [h.strip().rstrip("/") for h in os.getenv(
-    "BITPIN_HOSTS", "https://api.bitpin.ir"
-).split(",") if h.strip()]
+DEFAULT_WORKER_HOST = "https://divine-wildflower-badc.elikanaghdali1000.workers.dev"
+
+env_hosts = os.getenv("BITPIN_HOSTS", "").strip()
+if env_hosts:
+    BITPIN_HOSTS = [h.strip().rstrip("/") for h in env_hosts.split(",") if h.strip()]
+else:
+    BITPIN_HOSTS = [DEFAULT_WORKER_HOST]
+
 CANDLES_PATH = "/api/v1/mkt/candles/"
 TICKERS_PATH = "/api/v1/mkt/tickers/"
 
@@ -150,7 +151,8 @@ def get_json(path, params=None, timeout=25, retries=2):
         for attempt in range(retries):
             try:
                 _throttle()
-                r = SESSION.get(host + path, params=params, timeout=timeout)
+                url = host + path
+                r = SESSION.get(url, params=params, timeout=timeout)
                 if r.status_code == 200:
                     try:
                         data = r.json()
@@ -678,6 +680,7 @@ def main():
     log("=" * 66)
     log(f"ربات سیگنال دانچیان ۵۵ | نسخه {VERSION}")
     log(f"تایم‌فریم {TIMEFRAME} | {len(SYMBOLS)} نماد | DRY_RUN={DRY_RUN}")
+    log(f"هاست فعال دیتا: {BITPIN_HOSTS[0]}")
     log("=" * 66)
 
     signal.signal(signal.SIGTERM, _handle_stop)
