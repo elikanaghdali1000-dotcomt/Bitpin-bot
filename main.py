@@ -89,7 +89,7 @@ def _env_int(name, default):
     except (TypeError, ValueError):
         return default
 
-DRY_RUN          = _env_bool("DRY_RUN", True)
+DRY_RUN          = _env_bool("DRY_RUN", false)
 TIMEFRAME        = os.getenv("TIMEFRAME", "4h").strip().lower()
 PERIOD           = 14400 if TIMEFRAME == "4h" else 3600
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
