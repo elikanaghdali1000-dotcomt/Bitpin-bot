@@ -16,7 +16,7 @@ import requests
 # =====================================================================
 # ۱) تنظیمات
 # =====================================================================
-VERSION = "1.0.1"
+VERSION = "2.1.0"
 
 def _env_bool(name, default=False):
     v = os.getenv(name)
@@ -36,14 +36,11 @@ def _env_int(name, default):
     except (TypeError, ValueError):
         return default
 
-# حالت واقعی (غیر آزمایشی)
 DRY_RUN          = _env_bool("DRY_RUN", False)
-
 TIMEFRAME        = os.getenv("TIMEFRAME", "4h").strip().lower()
 PERIOD           = 14400 if TIMEFRAME == "4h" else 3600
 
-# اطلاعات تلگرام (ثابت‌شده و دست‌نخورده)
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8947033412:AAEPvb8CEn5I_9Bxe8oqPuGD1gNjfY5TrUA").strip()
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "*******").strip()
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "6643451227").strip()
 TG_IN_DRY_RUN    = _env_bool("TG_IN_DRY_RUN", True)
 
@@ -51,19 +48,29 @@ EQUITY_USDT      = _env_float("EQUITY_USDT", 1000.0)
 RISK_PCT         = _env_float("RISK_PCT", 1.0)
 MAX_NOTIONAL_MULT = _env_float("MAX_NOTIONAL_MULT", 5.0)
 
-# --- پارامترهای استراتژی ---
-DC_LEN       = 55
-VOL_MULT     = 1.2
-ADX_MIN      = 18.0
-ATR_LEN      = 14
-SL_ATR       = 2.5
-TP_ATR       = 8.0
-MAX_HOLD     = 48
-WARMUP       = 260
-MIN_RISK_PCT = 0.25
-MAX_RISK_PCT = 15.0
+# --- پارامترهای استراتژی و حجم ---
+DC_LEN             = 55
+ADX_MIN            = 18.0
+ATR_LEN            = 14
+SL_ATR             = 2.5
+TP_ATR             = 8.0
+MAX_HOLD           = 48
+WARMUP             = 260
+MIN_RISK_PCT       = 0.25
+MAX_RISK_PCT       = 15.0
 
-# --- لیست سفید نمادها ---
+# پارامترهای ماژول پیشرفته حجم
+VOL_WINDOW         = 20
+VOL_MIN            = 1.2
+VOL_PREV_MIN       = 1.0
+BODY_MIN           = 0.6
+TURNOVER_WINDOW    = 180
+MIN_TURNOVER_USDT  = 2000.0
+MAX_SPREAD_PCT     = 0.60
+DEPTH_MULT         = 1.5
+ZERO_VOL_MAX       = 0.05
+STALE_VOL_MAX      = 0.10
+
 DEFAULT_SYMBOLS = [
     "SOL_USDT", "ADA_USDT", "XRP_USDT", "ALGO_USDT", "GALA_USDT", "AAVE_USDT",
     "CRV_USDT", "NEAR_USDT", "ARB_USDT", "UNI_USDT", "SUI_USDT", "VET_USDT",
@@ -84,7 +91,7 @@ STATE_FILE    = os.getenv("STATE_FILE", "donchian_state.json")
 LOG_FILE      = os.getenv("LOG_FILE", "donchian_bot.log")
 
 # =====================================================================
-# ۲) لاگ
+# ۲) سیستم لاگ
 # =====================================================================
 _LOG_LOCK = threading.Lock()
 
@@ -101,7 +108,7 @@ def log(msg, level="info"):
             pass
 
 # =====================================================================
-# ۳) لایه HTTP (اتصال قطعی از ورکر کلودفلر)
+# ۳) لایه HTTP (ارتباط با بیت‌پین)
 # =====================================================================
 DEFAULT_WORKER_HOST = "https://divine-wildflower-badc.elikanaghdali1000.workers.dev"
 
@@ -111,8 +118,9 @@ if env_hosts:
 else:
     BITPIN_HOSTS = [DEFAULT_WORKER_HOST]
 
-CANDLES_PATH = "/api/v1/mkt/candles/"
-TICKERS_PATH = "/api/v1/mkt/tickers/"
+CANDLES_PATH  = "/api/v1/mkt/candles/"
+TICKERS_PATH  = "/api/v1/mkt/tickers/"
+ORDERBOOK_PATH = "/api/v1/mkt/depth/"
 
 RES_SECONDS = {"1m": 60, "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "4h": 14400, "1d": 86400}
 
@@ -122,7 +130,6 @@ SESSION.headers.update({
                    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"),
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9,fa;q=0.8",
-    "Accept-Encoding": "gzip, deflate, br",
     "Origin": "https://bitpin.ir",
     "Referer": "https://bitpin.ir/",
     "Connection": "keep-alive",
@@ -173,11 +180,10 @@ def get_json(path, params=None, timeout=25, retries=2):
     HTTP_STATE["hard_fail"] += 1
     HTTP_STATE["last_error"] = str(last_err)
     HTTP_STATE["ok_streak"] = 0
-    log(f"[HTTP] {path} failed: {last_err}", "error")
     return None, None
 
 # =====================================================================
-# ۴) داده‌ها
+# ۴) مدیریت داده‌ها و اندیکاتورها
 # =====================================================================
 def fetch_candles(symbol, count=CANDLE_COUNT):
     step = RES_SECONDS[TIMEFRAME]
@@ -243,18 +249,139 @@ def get_prices():
         _PRICE["data"], _PRICE["ts"] = out, time.time()
     return out or _PRICE["data"]
 
-# =====================================================================
-# ۵) اندیکاتورها
-# =====================================================================
 def _ema(s, n):
     return s.ewm(span=n, adjust=False).mean()
 
 def _rma(s, n):
     return s.ewm(alpha=1.0 / n, adjust=False).mean()
 
-def add_indicators(df):
-    d = df.copy()
-    h, l, c, v = d.High, d.Low, d.Close, d.Volume
+# =====================================================================
+# ۵) ماژول پیشرفته حجم و کیفیت داده (سه لایه - نسخه عملیاتی)
+# =====================================================================
+def data_quality(d: pd.DataFrame, lookback: int = 500) -> dict:
+    tail = d.tail(lookback)
+    v = tail["Volume"].astype(float)
+    zero_share = float((v <= 0).mean())
+    stale_share = float((v.diff() == 0).mean())
+    flat_share = float((tail["High"] == tail["Low"]).mean())
+    ok = (zero_share <= ZERO_VOL_MAX) and (stale_share <= STALE_VOL_MAX)
+    return {
+        "zero_vol_share": round(zero_share, 4),
+        "stale_vol_share": round(stale_share, 4),
+        "flat_candle_share": round(flat_share, 4),
+        "ok": bool(ok),
+    }
+
+def add_volume_features(d: pd.DataFrame) -> pd.DataFrame:
+    d = d.copy()
+    c = d["Close"].astype(float)
+    v = d["Volume"].astype(float)
+    o = d["Open"].astype(float)
+    h = d["High"].astype(float)
+    l = d["Low"].astype(float)
+
+    d["turnover"] = c * v
+    d["turnover_med"] = d["turnover"].rolling(TURNOVER_WINDOW, min_periods=60).median()
+    d["vol_sma"] = v.rolling(VOL_WINDOW, min_periods=VOL_WINDOW).mean()
+    d["vol_ratio"] = v / d["vol_sma"].replace(0, np.nan)
+
+    candle_range = (h - l).replace(0, np.nan)
+    d["body_ratio"] = (c - o).abs() / candle_range
+    return d
+
+def volume_gate(d: pd.DataFrame, min_turnover: float = MIN_TURNOVER_USDT) -> dict:
+    if len(d) == 0:
+        return {"ok": False, "reason": "داده خالی"}
+
+    last_row = d.iloc[-1]
+    prev_vol_ratio = float(d["vol_ratio"].iloc[-2]) if len(d) >= 2 else 0.0
+
+    liq_ok = bool(last_row.get("turnover_med", 0.0) >= min_turnover)
+    spike_ok = bool(last_row.get("vol_ratio", 0.0) >= VOL_MIN)
+    persist_ok = bool(prev_vol_ratio >= VOL_PREV_MIN)
+    body_ok = bool(last_row.get("body_ratio", 0.0) >= BODY_MIN)
+
+    ok = liq_ok and spike_ok and persist_ok and body_ok
+
+    reasons = []
+    if not liq_ok:
+        reasons.append(f"نقدشوندگی ضعیف ({last_row.get('turnover_med', 0):,.0f} < {min_turnover:,.0f}$)")
+    if not spike_ok:
+        reasons.append(f"حجم کندل ناکافی ({last_row.get('vol_ratio', 0):.2f} < {VOL_MIN})")
+    if not persist_ok:
+        reasons.append(f"عدم تداوم حجم کندل قبل ({prev_vol_ratio:.2f} < {VOL_PREV_MIN})")
+    if not body_ok:
+        reasons.append(f"بدنه کندل ضعیف ({last_row.get('body_ratio', 0):.2f} < {BODY_MIN})")
+
+    return {
+        "ok": ok,
+        "liq_ok": liq_ok,
+        "spike_ok": spike_ok,
+        "persist_ok": persist_ok,
+        "body_ok": body_ok,
+        "reason": " | ".join(reasons) if reasons else "تأیید کامل شروط حجم",
+    }
+
+def volume_filter(d: pd.DataFrame, min_turnover: float = MIN_TURNOVER_USDT) -> dict:
+    dq = data_quality(d)
+    d_feat = add_volume_features(d)
+    gate = volume_gate(d_feat, min_turnover=min_turnover)
+    ok = bool(gate["ok"] and dq["ok"])
+    turnover_val = float(d_feat["turnover_med"].iloc[-1]) if len(d_feat) and pd.notna(d_feat["turnover_med"].iloc[-1]) else 0.0
+
+    reason = gate["reason"]
+    if not dq["ok"]:
+        reason = f"کیفیت نامناسب داده (کندل فریز/صفر) | {reason}"
+
+    return {
+        "ok": ok,
+        "dq": dq,
+        "gate": gate,
+        "turnover_med": turnover_val,
+        "reason": reason,
+    }
+
+def orderbook_gate(symbol: str, notional_usdt: float) -> dict:
+    """لایه سوم: بررسی آنلاین اسپرد و عمق از دفتر سفارش (Fail-open)"""
+    try:
+        data, _ = get_json(f"/api/v1/mkt/depth/{symbol}/")
+        if not data:
+            return {"ok": True, "reason": "خطای دریافت دفتر سفارش (Fail-open)"}
+        bids = data.get("bids", [])
+        asks = data.get("asks", [])
+        if not bids or not asks:
+            return {"ok": True, "reason": "دفتر سفارش خالی (Fail-open)"}
+
+        bb = float(bids[0][0])
+        ba = float(asks[0][0])
+        if bb <= 0 or ba <= 0:
+            return {"ok": True, "reason": "قیمت نامعتبر دفتر سفارش"}
+
+        mid = (bb + ba) / 2.0
+        spread_pct = (ba - bb) / mid * 100.0
+
+        need = notional_usdt * DEPTH_MULT
+        depth = 0.0
+        for px, amt in asks:
+            depth += float(px) * float(amt)
+            if depth >= need:
+                break
+
+        if spread_pct > MAX_SPREAD_PCT:
+            return {"ok": False, "reason": f"اسپرد بالا: {spread_pct:.2f}%"}
+        if depth < need:
+            return {"ok": False, "reason": f"عمق ناکافی: {depth:,.0f}$"}
+
+        return {"ok": True, "reason": ""}
+    except Exception:
+        return {"ok": True, "reason": "استثنا در دفتر سفارش (Fail-open)"}
+
+# =====================================================================
+# ۶) اندیکاتورها و ارزیابی سیگنال (نسخه عملیاتی نهایی)
+# =====================================================================
+def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
+    d = add_volume_features(df)
+    h, l, c = d.High, d.Low, d.Close
 
     d["ema50"] = _ema(c, 50)
     d["ema200"] = _ema(c, 200)
@@ -272,29 +399,25 @@ def add_indicators(df):
     d["adx"] = _rma(dx.fillna(0), 14)
 
     d["dc_hi"] = h.rolling(DC_LEN).max().shift(1)
-    d["vol_ma"] = v.rolling(20).mean()
-    d["vol_ratio"] = v / d["vol_ma"].replace(0, np.nan)
     return d
 
-# =====================================================================
-# ۶) تشخیص سیگنال
-# =====================================================================
-def evaluate(df):
+def evaluate(symbol: str, df: pd.DataFrame) -> dict:
     if df is None or len(df) < WARMUP:
         return {"triggered": False, "reason": "داده کافی نیست"}
 
     d = add_indicators(df)
+    vol_res = volume_filter(df)
     i = len(d) - 1
     row = d.iloc[i]
 
-    if not all(np.isfinite(row[k]) for k in ("atr", "adx", "ema50", "ema200", "dc_hi", "vol_ratio")):
+    if not all(np.isfinite(row[k]) for k in ("atr", "adx", "ema50", "ema200", "dc_hi")):
         return {"triggered": False, "reason": "اندیکاتور ناقص"}
 
     checks = {
-        "breakout":  bool(row["Close"] > row["dc_hi"]),
-        "volume":    bool(row["vol_ratio"] >= VOL_MULT),
-        "trend":     bool(row["adx"] >= ADX_MIN),
-        "ema":       bool(row["ema50"] > row["ema200"]),
+        "breakout": bool(row["Close"] > row["dc_hi"]),
+        "volume":   bool(vol_res["ok"]),
+        "trend":    bool(row["adx"] >= ADX_MIN),
+        "ema":      bool(row["ema50"] > row["ema200"]),
     }
     triggered = all(checks.values())
 
@@ -315,11 +438,12 @@ def evaluate(df):
         "vol_ratio": float(row["vol_ratio"]),
         "ema50": float(row["ema50"]),
         "ema200": float(row["ema200"]),
-        "reason": "شکست سقف ۵۵ کندل با تأیید حجم/ADX/روند" if triggered else "شرط ورود کامل نیست",
+        "turnover_med": vol_res["turnover_med"],
+        "reason": "شکست سقف ۵۵ با فیلتر حجمی ۳ لایه و روند قوی" if triggered else f"رد شد: {vol_res['reason']}",
     }
 
 # =====================================================================
-# ۷) سطوح و حجم
+# ۷) سطوح و حجم پوزیشن
 # =====================================================================
 def build_levels(sig, price):
     atr = sig["atr"]
@@ -357,7 +481,7 @@ def build_levels(sig, price):
     }
 
 # =====================================================================
-# ۸) تلگرام
+# ۸) ارسال پیام تلگرام
 # =====================================================================
 _TG = {"lock": threading.Lock(), "ts": 0.0}
 TG_MIN_GAP = 1.2
@@ -404,9 +528,10 @@ def fmt_price(p):
 def format_signal(symbol, sig, lv):
     ts = datetime.fromtimestamp(sig["candle_ts"], tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
     lines = [
-        "🟢 <b>سیگنال خرید (LONG)</b>",
+        "🟢 <b>سیگنال خرید (LONG) - ماژول حجمی جدید</b>",
         f"<b>نماد:</b> <code>{symbol}</code>",
         f"<b>استراتژی:</b> شکست کانال ۵۵ ({TIMEFRAME})",
+        f"<b>گردش مالی میانه ۳۰ روزه:</b> <code>~{sig['turnover_med']:,.0f}$</code>",
         f"<b>کندل سیگنال:</b> {ts} UTC",
         "",
         f"<b>ورود (مارکت):</b> <code>{fmt_price(lv['entry'])}</code>",
@@ -427,7 +552,7 @@ def format_exit(pos, result, price, bars_held):
     return f"{icon} <b>{title}</b> — <code>{pos['symbol']}</code> | نتیجه: {pnl_pct:+.2f}% | {r_mult:+.2f}R"
 
 # =====================================================================
-# ۹) حالت (State)
+# ۹) مدیریت State (ذخیره وضعیت)
 # =====================================================================
 _STATE_LOCK = threading.Lock()
 STATS = {"scans": 0, "signals": 0, "errors": 0, "started": time.time()}
@@ -470,7 +595,7 @@ def mark_sent(symbol, candle_ts, lv):
     STATE["sent"] = {k: v for k, v in STATE["sent"].items() if v.get("ts", 0) > cutoff}
 
 # =====================================================================
-# ۱۰) پیگیری معاملات باز
+# ۱۰) پیگیری پوزیشن‌های باز
 # =====================================================================
 def track_open_positions(candles_cache, prices):
     if not STATE["open"]:
@@ -534,7 +659,7 @@ def _close_position(symbol, pos, exit_price, result, bars):
     save_state()
 
 # =====================================================================
-# ۱۱) چرخه اسکن
+# ۱۱) چرخه اسکن ربات
 # =====================================================================
 def run_cycle():
     STATS["scans"] += 1
@@ -545,14 +670,14 @@ def run_cycle():
     if not prices and not _PRICE["data"]:
         return {"ok": False, "data_symbols": 0, "signals": 0}
 
-    for idx, symbol in enumerate(SYMBOLS, 1):
+    for symbol in SYMBOLS:
         try:
             df = fetch_candles(symbol)
             if df is None or len(df) < WARMUP:
                 continue
             candles_cache[symbol] = df
 
-            sig = evaluate(df)
+            sig = evaluate(symbol, df)
             if not sig.get("triggered"):
                 continue
 
@@ -566,6 +691,12 @@ def run_cycle():
             if lv is None or lv.get("rejected"):
                 if lv and lv.get("rejected"):
                     mark_sent(symbol, sig["candle_ts"], {"entry": sig["close"]})
+                continue
+
+            # لایه سوم: چک کردن دفتر سفارش در لحظه سیگنال
+            ob_res = orderbook_gate(symbol, lv["notional"])
+            if not ob_res["ok"]:
+                log(f"[Orderbook] سیگنال {symbol} رد شد: {ob_res['reason']}", "warning")
                 continue
 
             send_telegram(format_signal(symbol, sig, lv))
@@ -591,7 +722,7 @@ def run_cycle():
     return {"ok": len(candles_cache) > 0, "data_symbols": len(candles_cache), "signals": found}
 
 # =====================================================================
-# ۱۲) Health server
+# ۱۲) سرور سلامت (Health Server)
 # =====================================================================
 class HealthHandler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
@@ -637,7 +768,7 @@ def start_health_server():
         log(f"[Health] بالا نیامد: {e}", "warning")
 
 # =====================================================================
-# ۱۳) حلقه اصلی
+# ۱۳) اجرای اصلی ربات
 # =====================================================================
 _STOP = {"flag": False}
 
@@ -678,9 +809,8 @@ def _sleep(total):
 
 def main():
     log("=" * 66)
-    log(f"ربات سیگنال دانچیان ۵۵ | نسخه {VERSION}")
+    log(f"ربات سیگنال دانچیان ۵۵ (مجهز به ماژول حجم ۳ لایه) | نسخه {VERSION}")
     log(f"تایم‌فریم {TIMEFRAME} | {len(SYMBOLS)} نماد | DRY_RUN={DRY_RUN}")
-    log(f"هاست فعال دیتا: {BITPIN_HOSTS[0]}")
     log("=" * 66)
 
     signal.signal(signal.SIGTERM, _handle_stop)
@@ -690,7 +820,7 @@ def main():
     start_health_server()
 
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-        send_telegram(f"🤖 <b>ربات دانچیان ۵۵ روشن شد</b>\nتایم‌فریم: {TIMEFRAME}")
+        send_telegram(f"🤖 <b>ربات دانچیان ۵۵ (نسخه پیشرفته حجم) روشن شد</b>\nتایم‌فریم: {TIMEFRAME}")
 
     while not _STOP["flag"]:
         HTTP_STATE["hard_fail"] = 0
@@ -705,13 +835,4 @@ def main():
         if HTTP_STATE["hard_fail"] > 0 or not result.get("ok"):
             sleep_s = RETRY_BACKOFF
         elif SCAN_MODE == "interval":
-            sleep_s = SCAN_INTERVAL
-        else:
-            sleep_s = seconds_to_next_candle()
-
-        _sleep(sleep_s)
-
-    save_state()
-
-if __name__ == "__main__":
-    main()
+            sleep
