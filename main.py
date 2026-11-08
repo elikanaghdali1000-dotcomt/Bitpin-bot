@@ -256,7 +256,7 @@ def _rma(s, n):
     return s.ewm(alpha=1.0 / n, adjust=False).mean()
 
 # =====================================================================
-# ۵) ماژول پیشرفته حجم و کیفیت داده (سه لایه - نسخه عملیاتی)
+# ۵) ماژول پیشرفته حجم و کیفیت داده (سه لایه)
 # =====================================================================
 def data_quality(d: pd.DataFrame, lookback: int = 500) -> dict:
     tail = d.tail(lookback)
@@ -342,7 +342,6 @@ def volume_filter(d: pd.DataFrame, min_turnover: float = MIN_TURNOVER_USDT) -> d
     }
 
 def orderbook_gate(symbol: str, notional_usdt: float) -> dict:
-    """لایه سوم: بررسی آنلاین اسپرد و عمق از دفتر سفارش (Fail-open)"""
     try:
         data, _ = get_json(f"/api/v1/mkt/depth/{symbol}/")
         if not data:
@@ -377,7 +376,7 @@ def orderbook_gate(symbol: str, notional_usdt: float) -> dict:
         return {"ok": True, "reason": "استثنا در دفتر سفارش (Fail-open)"}
 
 # =====================================================================
-# ۶) اندیکاتورها و ارزیابی سیگنال (نسخه عملیاتی نهایی)
+# ۶) اندیکاتورها و ارزیابی سیگنال
 # =====================================================================
 def add_indicators(df: pd.DataFrame) -> pd.DataFrame:
     d = add_volume_features(df)
@@ -552,7 +551,7 @@ def format_exit(pos, result, price, bars_held):
     return f"{icon} <b>{title}</b> — <code>{pos['symbol']}</code> | نتیجه: {pnl_pct:+.2f}% | {r_mult:+.2f}R"
 
 # =====================================================================
-# ۹) مدیریت State (ذخیره وضعیت)
+# ۹) مدیریت State
 # =====================================================================
 _STATE_LOCK = threading.Lock()
 STATS = {"scans": 0, "signals": 0, "errors": 0, "started": time.time()}
@@ -693,7 +692,6 @@ def run_cycle():
                     mark_sent(symbol, sig["candle_ts"], {"entry": sig["close"]})
                 continue
 
-            # لایه سوم: چک کردن دفتر سفارش در لحظه سیگنال
             ob_res = orderbook_gate(symbol, lv["notional"])
             if not ob_res["ok"]:
                 log(f"[Orderbook] سیگنال {symbol} رد شد: {ob_res['reason']}", "warning")
@@ -722,7 +720,7 @@ def run_cycle():
     return {"ok": len(candles_cache) > 0, "data_symbols": len(candles_cache), "signals": found}
 
 # =====================================================================
-# ۱۲) سرور سلامت (Health Server)
+# ۱۲) سرور سلامت
 # =====================================================================
 class HealthHandler(BaseHTTPRequestHandler):
     def _send(self, code, body, ctype="application/json; charset=utf-8"):
@@ -763,9 +761,9 @@ def start_health_server():
     try:
         srv = HTTPServer(("0.0.0.0", port), HealthHandler)
         threading.Thread(target=srv.serve_forever, daemon=True).start()
-        log(f"[Health] روی پورت {port} بالا آمد")
+        log(f"[Health] سرور سلامت روی پورت {port} با موفقیت فعال شد", "ok")
     except Exception as e:
-        log(f"[Health] بالا نیامد: {e}", "warning")
+        log(f"[Health] خطا در فعال‌سازی پورت {port}: {e}", "warning")
 
 # =====================================================================
 # ۱۳) اجرای اصلی ربات
@@ -808,6 +806,10 @@ def _sleep(total):
             next_check += PRICE_POLL
 
 def main():
+    # فوری اجرا کردن سرور برای جلوگیری از تایم‌اوت در Render
+    start_health_server()
+    time.sleep(1)
+
     log("=" * 66)
     log(f"ربات سیگنال دانچیان ۵۵ (مجهز به ماژول حجم ۳ لایه) | نسخه {VERSION}")
     log(f"تایم‌فریم {TIMEFRAME} | {len(SYMBOLS)} نماد | DRY_RUN={DRY_RUN}")
@@ -817,7 +819,6 @@ def main():
     signal.signal(signal.SIGINT, _handle_stop)
 
     load_state()
-    start_health_server()
 
     if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
         send_telegram(f"🤖 <b>ربات دانچیان ۵۵ (نسخه پیشرفته حجم) روشن شد</b>\nتایم‌فریم: {TIMEFRAME}")
@@ -827,12 +828,17 @@ def main():
         result = {"ok": False, "data_symbols": 0, "signals": 0}
         try:
             result = run_cycle() or result
-        except Exception as e:
+        except Exception:
             STATS["errors"] += 1
 
         STATS["last_scan"] = int(time.time())
 
         if HTTP_STATE["hard_fail"] > 0 or not result.get("ok"):
-            sleep_s = RETRY_BACKOFF
+            _sleep(RETRY_BACKOFF)
         elif SCAN_MODE == "interval":
-            sleep
+            _sleep(SCAN_INTERVAL)
+        else:
+            _sleep(seconds_to_next_candle())
+
+if __name__ == "__main__":
+    main()
