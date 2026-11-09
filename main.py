@@ -1575,7 +1575,7 @@ def main():
 
 if __name__ == "__main__":
     main()
-"
+
 ).split(",") if h.strip()]
 CANDLES_PATH = "/api/v1/mkt/candles/"
 TICKERS_PATH = "/api/v1/mkt/tickers/"
