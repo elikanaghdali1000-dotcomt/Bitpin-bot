@@ -1,10 +1,11 @@
 import requests
 
-url = "https://api.bitpin.org/v1/mkt/markets/"
-headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-}
+# تست دریافت تیکرها از طریق ورکر کلودفلر
+url = "https://divine-wildflower-badc.elikanaghdali1000.workers.dev/v1/mkt/tickers/"
 
-res = requests.get(url, headers=headers)
-print("Status Code:", res.status_code)
-print("Response preview:", res.text[:100])
+try:
+    response = requests.get(url, timeout=10)
+    print("Status Code:", response.status_code)
+    print("Response Preview:", response.text[:200])
+except Exception as e:
+    print("Error:", e)
