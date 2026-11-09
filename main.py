@@ -239,7 +239,8 @@ def log(msg, level="info"):
 # با متغیر محیطی BITPIN_HOSTS (جدا شده با کاما) قابل بازنویسی است.
 BITPIN_HOSTS = [h.strip().rstrip("/") for h in os.getenv(
    BITPIN_HOSTS = [h.strip().rstrip("/") for h in os.getenv(
-    "BITPIN_HOSTS", "https://divine-wildflower-badc.elikanaghdali1000.workers.dev").split(",") if h.strip()]
+   BITPIN_HOSTS = ["https://divine-wildflower-badc.elikanaghdali1000.workers.dev"]
+
 
 # -*- coding: utf-8
 # -*- coding: utf-8 -*-
