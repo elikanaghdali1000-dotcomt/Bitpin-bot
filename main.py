@@ -238,7 +238,9 @@ def log(msg, level="info"):
 # دامنه‌ها: api.bitpin.com از سرور کاربر در دسترس نیست، پس آخرین گزینه است.
 # با متغیر محیطی BITPIN_HOSTS (جدا شده با کاما) قابل بازنویسی است.
 BITPIN_HOSTS = [h.strip().rstrip("/") for h in os.getenv(
-    "BITPIN_HOSTS", "https://divine-wildflower-badc.elikanaghdali1000.workers.dev
+   BITPIN_HOSTS = [h.strip().rstrip("/") for h in os.getenv(
+    "BITPIN_HOSTS", "https://divine-wildflower-badc.elikanaghdali1000.workers.dev").split(",") if h.strip()]
+
 # -*- coding: utf-8
 # -*- coding: utf-8 -*-
 """
