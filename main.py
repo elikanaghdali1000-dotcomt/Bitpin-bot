@@ -253,7 +253,7 @@ def log(msg, level="info"):
 # دامنه‌ها: api.bitpin.com از سرور کاربر در دسترس نیست، پس آخرین گزینه است.
 # با متغیر محیطی BITPIN_HOSTS (جدا شده با کاما) قابل بازنویسی است.
 BITPIN_HOSTS = [h.strip().rstrip("/") for h in os.getenv(
-    "BITPIN_HOSTS", "https://api.bitpin.org,https://api.bitpin.ir,https://api.bitpin.org"
+    "BITPIN_HOSTS", "https://api.bitpin.ir,https://api.bitpin.org"
 ).split(",") if h.strip()]
 CANDLES_PATH = "/api/v1/mkt/candles/"
 TICKERS_PATH = "/api/v1/mkt/tickers/"
