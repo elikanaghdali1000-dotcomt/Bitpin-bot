@@ -1,36 +1,32 @@
-export default {
-  async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    
-    // ۱. مقصد را همیشه به api.bitpin.ir بفرست (چون .org مسدود است)
-    const targetUrl = "https://api.bitpin.ir" + url.pathname + url.search;
-    
-    // ۲. کپی کردن هدرهای اصلی و اضافه کردن هدرهای مرورگر برای دور زدن ۴۰۳
-    const newHeaders = new Headers(request.headers);
-    newHeaders.set("Origin", "https://bitpin.ir");
-    newHeaders.set("Referer", "https://bitpin.ir/");
-    newHeaders.set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36");
+"""تست مستقل دریافت قیمت BTC_USDT از بیت‌پین (یا از طریق Cloudflare Worker)."""
+import requests
 
-    const modifiedRequest = new Request(targetUrl, {
-      method: request.method,
-      headers: newHeaders,
-      body: request.body,
-      redirect: "follow",
-    });
+WORKER = "https://divine-wildflower-badc.elikanaghdali1000.workers.dev"
+HOSTS  = [WORKER, "https://api.bitpin.org", "https://api.bitpin.ir"]
+PATH   = "/api/v1/mkt/tickers/"
+SYMBOL = "BTC_USDT"
 
-    try {
-      const response = await fetch(modifiedRequest);
-      // ۳. برگرداندن پاسخ به رندر
-      const responseHeaders = new Headers(response.headers);
-      responseHeaders.set("Access-Control-Allow-Origin", "*");
-      
-      return new Response(response.body, {
-        status: response.status,
-        statusText: response.statusText,
-        headers: responseHeaders,
-      });
-    } catch (e) {
-      return new Response("Proxy Error: " + e.message, { status: 500 });
-    }
-  },
-};
+HDR = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
+    "Origin": "https://bitpin.ir",
+    "Referer": "https://bitpin.ir/",
+}
+
+for host in HOSTS:
+    url = host + PATH
+    try:
+        r = requests.get(url, headers=HDR, timeout=15)
+        if r.status_code == 200:
+            data = r.json()
+            # اگر آرایه بود، دنبال BTC بگرد
+            if isinstance(data, list):
+                found = next((t.get("price") for t in data if str(t.get("symbol", "")).upper() == SYMBOL), None)
+                if found:
+                    print(f"✅ موفق از طریق {host} -> قیمت بیت‌کوین: {found}")
+                    continue
+            print(f"⚠️ پاسخ موفق ۲٠٠ بود اما ساختار داده متفاوت بود از {host}")
+        else:
+            print(f"❌ خطا {r.status_code} از {host}")
+    except Exception as e:
+        print(f"🚨 استثنا برای {host}: {e}")
