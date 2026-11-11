@@ -254,8 +254,7 @@ def log(msg, level="info"):
 # می‌توان فهرست میزبان‌ها را با BITPIN_HOSTS (جداشده با کاما) بازنویسی کرد.
 BITPIN_WORKER = "https://divine-wildflower-badc.elikanaghdali1000.workers.dev"
 BITPIN_HOSTS = [h.strip().rstrip("/") for h in os.getenv(
-    "BITPIN_HOSTS",
-    f"{BITPIN_WORKER},https://api.bitpin.org,https://api.bitpin.ir,https://api.bitpin.com"
+    "BITPIN_HOSTS", BITPIN_WORKER
 ).split(",") if h.strip()]
 CANDLES_PATH = "/api/v1/mkt/candles/"
 TICKERS_PATH = "/api/v1/mkt/tickers/"
