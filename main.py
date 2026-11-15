@@ -174,8 +174,8 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "#!/usr/bin/env python3
 ⚠️ خروجی این برنامه توصیه سرمایه‌گذاری نیست. مسئولیت هر معامله با خود شماست.
 
 اجرا:
-    export TELEGRAM_BOT_TOKEN="123:ABC"
-    export TELEGRAM_CHAT_ID="123456789"
+    export TELEGRAM_BOT_TOKEN="8947033412:AAEPvb8CEn5I_9Bxe8oqPuGD1gNjfY5TrUA"
+    export TELEGRAM_CHAT_ID="6643451227"
     python3 bitpin_donchian_bot.py
 
 متغیرهای محیطی مهم:
