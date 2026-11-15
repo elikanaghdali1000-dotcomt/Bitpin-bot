@@ -237,7 +237,7 @@ def log(msg, level="info"):
 # =====================================================================
 # دامنه‌ها: api.bitpin.com از سرور کاربر در دسترس نیست، پس آخرین گزینه است.
 # با متغیر محیطی BITPIN_HOSTS (جدا شده با کاما) قابل بازنویسی است.
-BITPIN_HOSTS = ["https://api.bitpin.com"]
+BITPIN_HOSTS = ["https://api.bitpin.ir"]
 CANDLES_PATH = "/api/v1/mkt/candles/"
 TICKERS_PATH = "/api/v1/mkt/tickers/"
 # مسیر درست دفتر سفارش — تایید شده با پاسخ ۲۰۰.
