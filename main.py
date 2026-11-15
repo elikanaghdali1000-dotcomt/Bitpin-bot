@@ -135,8 +135,8 @@ def _env_int(name, default):
 DRY_RUN          = _env_bool("DRY_RUN", True)
 TIMEFRAME        = os.getenv("TIMEFRAME", "4h").strip().lower()
 PERIOD           = 14400 if TIMEFRAME == "4h" else 3600
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+TELEGRAM_BOT_TOKEN = "secret-7a5d41d2"
+TELEGRAM_CHAT_ID = "6643451227"
 TG_IN_DRY_RUN    = _env_bool("TG_IN_DRY_RUN", True)   # در حالت تست هم پیام بفرست؟
 
 EQUITY_USDT      = _env_float("EQUITY_USDT", 1000.0)
@@ -237,7 +237,7 @@ def log(msg, level="info"):
 # =====================================================================
 # دامنه‌ها: api.bitpin.com از سرور کاربر در دسترس نیست، پس آخرین گزینه است.
 # با متغیر محیطی BITPIN_HOSTS (جدا شده با کاما) قابل بازنویسی است.
-BITPIN_HOSTS = ["https://divine-wildflower-badc.elikanaghdali1000.workers.dev"]
+BITPIN_HOSTS = ["https://api.bitpin.com"]
 CANDLES_PATH = "/api/v1/mkt/candles/"
 TICKERS_PATH = "/api/v1/mkt/tickers/"
 # مسیر درست دفتر سفارش — تایید شده با پاسخ ۲۰۰.
