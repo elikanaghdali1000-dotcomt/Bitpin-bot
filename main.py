@@ -135,7 +135,7 @@ def _env_int(name, default):
 DRY_RUN          = _env_bool("DRY_RUN", True)
 TIMEFRAME        = os.getenv("TIMEFRAME", "4h").strip().lower()
 PERIOD           = 14400 if TIMEFRAME == "4h" else 3600
-TELEGRAM_BOT_TOKEN = "secret-7a5d41d2"
+TELEGRAM_BOT_TOKEN = "8947033412:AAEPvb8CEn5I_9Bxe8oqPuGD1gNjfY5TrUA"
 TELEGRAM_CHAT_ID = "6643451227"
 TG_IN_DRY_RUN    = _env_bool("TG_IN_DRY_RUN", True)   # در حالت تست هم پیام بفرست؟
 
